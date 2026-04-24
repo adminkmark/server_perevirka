@@ -223,6 +223,24 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
                 if is_major_heading(text): return text
         return None
 
+    def get_page_first_line_info(page) -> dict | None:
+        blocks = page.get_text("dict")["blocks"]
+        for b in blocks:
+            if "lines" not in b: continue
+            for l in b["lines"]:
+                text = "".join(s["text"] for s in l["spans"]).strip()
+                if not text: continue
+                # Ігноруємо номери сторінок
+                if text.isdigit() and (l["bbox"][1] < 60 or l["bbox"][3] > page.rect.height - 60):
+                    continue
+                first_span = l["spans"][0]
+                return {
+                    "text": text,
+                    "is_bold": bool(first_span["flags"] & 16),
+                    "starts_with_digit": text[0].isdigit()
+                }
+        return None
+
     stop_page = len(doc) + 1
     for i in range(2, len(doc)):
         heading = get_page_major_heading(doc[i])
@@ -266,7 +284,7 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
                 page_center = width / 2
                 l["is_centered"] = abs(line_center - page_center) < 40 and (l["bbox"][2] - l["bbox"][0]) < width * 0.7
                 first_span = l["spans"][0]
-                l["is_bold"] = bool(first_span["flags"] & 4) or font_is_bold(first_span["font"])
+                l["is_bold"] = bool(first_span["flags"] & 16) or font_is_bold(first_span["font"])
                 l["starts_with_digit"] = text[0].isdigit()
 
                 paragraph_lines.append(l)
@@ -310,11 +328,15 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
         
         # Порожнє місце знизу
         if actual_bottom > 4.5 * CM:
-            is_section_end = False
+            is_valid_break = False
             if page_num < len(doc):
-                next_page_heading = get_page_major_heading(doc[page_num])
-                if next_page_heading: is_section_end = True
-            if not is_section_end:
+                next_page_info = get_page_first_line_info(doc[page_num])
+                if next_page_info:
+                    # Якщо наступна сторінка починається з Жирного заголовку (не з цифри) - це дозволений розрив
+                    if next_page_info["is_bold"] and not next_page_info["starts_with_digit"]:
+                        is_valid_break = True
+            
+            if not is_valid_break:
                 page_findings.append(f"Порожнє місце знизу ({actual_bottom/CM:.1f} см).")
                 highlights.append({"page": page_num, "x": 0, "y": actual_bottom_y, "w": width, "h": actual_bottom})
 
@@ -339,6 +361,122 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
 
     return {"summary": "Текст перевірено.", "findings": findings, "is_success": len(findings) == 0, "pages_with_errors": sorted(list(pages_with_errors)), "highlights": highlights}
 
+def analyze_chapters(doc: fitz.Document) -> dict[str, Any]:
+    findings = []
+    highlights = []
+    CM = 28.346
+    
+    for page_num in range(1, len(doc) + 1):
+        page = doc[page_num-1]
+        blocks = page.get_text("dict")["blocks"]
+        lines = []
+        for b in blocks:
+            if "lines" not in b: continue
+            for l in b["lines"]:
+                text = "".join(s["text"] for s in l["spans"]).strip()
+                if not text: continue
+                # Skip page numbers
+                if text.isdigit() and (l["bbox"][1] < 60 or l["bbox"][3] > page.rect.height - 60): continue
+                lines.append(l)
+        
+        if not lines: continue
+        
+        for idx, line in enumerate(lines):
+            text = "".join(s["text"] for s in line["spans"]).strip()
+            clean = text.upper()
+            
+            if re.match(r"^РОЗДІЛ\s+\d+", clean):
+                # 1. Початок сторінки (не обов'язково перший рядок, але зверху не має бути іншого тексту)
+                if idx > 0 and lines[idx-1]["bbox"][3] < line["bbox"][1]:
+                    # Перевіряємо чи зверху немає "важкого" тексту
+                    if lines[idx-1]["bbox"][1] > 100: # Якщо попередній текст нижче 100пт, то це не початок
+                         findings.append(f"Стор. {page_num}: РОЗДІЛ має починатися з нової сторінки.")
+
+                # 2. По центру
+                line_center = (line["bbox"][0] + line["bbox"][2]) / 2
+                if abs(line_center - page.rect.width/2) > 40:
+                    findings.append(f"Стор. {page_num}: 'РОЗДІЛ' має бути по центру.")
+                
+                # 3. Великі та Жирні
+                first_span = line["spans"][0]
+                is_bold = bool(first_span["flags"] & 16)
+                if text != text.upper() or not is_bold:
+                    findings.append(f"Стор. {page_num}: 'РОЗДІЛ' має бути ВЕЛИКИМИ ЖИРНИМИ літерами.")
+                
+                # 4. Крапка після номера
+                if re.search(r"РОЗДІЛ\s+\d+\.", text):
+                    findings.append(f"Стор. {page_num}: Після номера розділу крапку не ставлять.")
+                
+                # 5. Наступна стока - назва
+                if idx + 1 < len(lines):
+                    next_line = lines[idx+1]
+                    next_text = "".join(s["text"] for s in next_line["spans"]).strip()
+                    next_center = (next_line["bbox"][0] + next_line["bbox"][2]) / 2
+                    
+                    if abs(next_center - page.rect.width/2) > 40:
+                        findings.append(f"Стор. {page_num}: Назва розділу має бути по центру.")
+                    
+                    if next_text != next_text.upper() or not bool(next_line["spans"][0]["flags"] & 16):
+                         findings.append(f"Стор. {page_num}: Назва розділу має бути ВЕЛИКИМИ ЖИРНИМИ літерами.")
+                    
+                    if next_text.endswith("."):
+                        findings.append(f"Стор. {page_num}: В кінці назви розділу крапку не ставлять.")
+                    
+                    # 6. Порожня строка після
+                    if idx + 2 < len(lines):
+                        gap = lines[idx+2]["bbox"][1] - next_line["bbox"][3]
+                        if gap < 25: # Замалий відступ
+                            findings.append(f"Стор. {page_num}: Після назви розділу має бути порожній рядок.")
+                else:
+                    findings.append(f"Стор. {page_num}: Не знайдено назву розділу під словом 'РОЗДІЛ'.")
+
+    return {"summary": "Перевірку розділів завершено.", "findings": findings, "is_success": len(findings) == 0}
+
+def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
+    findings = []
+    highlights = []
+    CM = 28.346
+    TARGET_LEFT = 2.5 * CM
+    
+    for page_num in range(3, len(doc) + 1):
+        page = doc[page_num-1]
+        blocks = page.get_text("dict")["blocks"]
+        lines = []
+        for b in blocks:
+            if "lines" not in b: continue
+            for l in b["lines"]:
+                text = "".join(s["text"] for s in l["spans"]).strip()
+                if not text: continue
+                lines.append(l)
+        
+        for idx, line in enumerate(lines):
+            text = "".join(s["text"] for s in line["spans"]).strip()
+            # Патерн n.n Текст
+            if re.match(r"^\d+\.\d+\s+", text):
+                # 1. Жирний
+                is_bold = bool(line["spans"][0]["flags"] & 16)
+                if not is_bold:
+                    findings.append(f"Стор. {page_num}: Підрозділ '{text[:20]}...' має бути жирним.")
+                
+                # 2. Абзацний відступ (1.5 см від лівого поля)
+                indent = line["bbox"][0] - TARGET_LEFT
+                if abs(indent - 1.5 * CM) > 0.5 * CM:
+                    findings.append(f"Стор. {page_num}: Підрозділ має починатися з абзацу 1.5 см.")
+                
+                # 3. Порожня строка зверху
+                if idx > 0:
+                    gap_above = line["bbox"][1] - lines[idx-1]["bbox"][3]
+                    if gap_above < 25:
+                        findings.append(f"Стор. {page_num}: Над підрозділом '{text[:15]}' має бути порожній рядок.")
+                
+                # 4. Порожня строка знизу
+                if idx + 1 < len(lines):
+                    gap_below = lines[idx+1]["bbox"][1] - line["bbox"][3]
+                    if gap_below < 25:
+                        findings.append(f"Стор. {page_num}: Під підрозділом '{text[:15]}' має бути порожній рядок.")
+
+    return {"summary": "Перевірку підрозділів завершено.", "findings": findings, "is_success": len(findings) == 0}
+
 @app.post("/analyze")
 def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     try:
@@ -350,6 +488,8 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     try:
         if request.analysis_type == "page_numbers": result = analyze_page_numbers(doc)
         elif request.analysis_type == "general_text": result = analyze_general_text(doc)
+        elif request.analysis_type == "chapters": result = analyze_chapters(doc)
+        elif request.analysis_type == "subchapters": result = analyze_subchapters(doc)
         elif request.analysis_type == "zmist":
             rows, page_width = extract_page_rows_fitz(doc, request.page_number)
             result = analyze_zmist(rows, page_width)
