@@ -118,6 +118,7 @@ def extract_page_rows(reader: PdfReader, page_number: int) -> tuple[list[dict[st
                 "font_size": mean(span["font_size"] for span in content_spans),
                 "font_names": sorted({span["font_name"] for span in content_spans if span["font_name"]}),
                 "is_bold": any(span["is_bold"] for span in content_spans),
+                "spans": content_spans,
             }
         )
 
@@ -190,28 +191,38 @@ def analyze_zmist(rows: list[dict[str, Any]], page_width: float) -> dict[str, An
 
 
 def extract_page_number_from_rows(rows: list[dict[str, Any]], search_region: dict[str, float] | None = None) -> dict[str, Any] | None:
-    def check_row(row):
-        if search_region:
-            if not (search_region["xmin"] <= row["x"] <= search_region["xmax"] and 
-                    search_region["ymin"] <= row["y"] <= search_region["ymax"]):
-                return None
-        
-        alpha = re.sub(r"[^A-Za-zА-Яа-яІіЄєЇїҐґ0-9]", "", row["clean"])
+    def is_pure_number(text: str) -> str | None:
+        alpha = re.sub(r"[^A-Za-zА-Яа-яІіЄєЇїҐґ0-9]", "", text)
         if re.fullmatch(r"\d{1,4}", alpha):
-            return {"text": alpha, "x": row["x"], "y": row["y"]}
+            return alpha
         return None
+
+    def in_region(x: float, y: float) -> bool:
+        if not search_region:
+            return True
+        return (search_region["xmin"] <= x <= search_region["xmax"] and 
+                search_region["ymin"] <= y <= search_region["ymax"])
 
     if search_region:
         for row in rows:
-            num = check_row(row)
-            if num: return num
+            if in_region(row["x"], row["y"]):
+                num_text = is_pure_number(row["clean"])
+                if num_text:
+                    return {"text": num_text, "x": row["x"], "y": row["y"]}
+            
+            if "spans" in row:
+                for span in row["spans"]:
+                    if in_region(span["x"], span["y"]):
+                        num_text = is_pure_number(span["text"])
+                        if num_text:
+                            return {"text": num_text, "x": span["x"], "y": span["y"]}
     else:
         for row in rows[:5]:
-            num = check_row(row)
-            if num: return num
+            num_text = is_pure_number(row["clean"])
+            if num_text: return {"text": num_text, "x": row["x"], "y": row["y"]}
         for row in rows[-5:]:
-            num = check_row(row)
-            if num: return num
+            num_text = is_pure_number(row["clean"])
+            if num_text: return {"text": num_text, "x": row["x"], "y": row["y"]}
             
     return None
 
