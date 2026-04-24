@@ -203,29 +203,48 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
         page = doc[page_num-1]
         blocks = page.get_text("dict")["blocks"]
         lines = [l for b in blocks if "lines" in b for l in b["lines"] if "".join(s["text"] for s in l["spans"]).strip()]
+        
+        skip_until = -1
         for idx, line in enumerate(lines):
+            if idx <= skip_until: continue
+            
             text = "".join(s["text"] for s in line["spans"]).strip()
-            if re.match(r"^\d+\.\d+\s+", text):
+            # Патерн n.n або n.n. Текст
+            if re.match(r"^\d+\.\d+\.?\s+", text):
                 p_f = []
-                if not bool(line["spans"][0]["flags"] & 16):
-                    p_f.append("Підрозділ не жирний"); highlights.append({"page": page_num, "x": line["bbox"][0], "y": line["bbox"][1], "w": line["bbox"][2]-line["bbox"][0], "h": line["bbox"][3]-line["bbox"][1]})
-                if abs(line["bbox"][0] - 2.5*CM - 1.5*CM) > 0.5*CM:
-                    p_f.append("Відступ не 1.5 см"); highlights.append({"page": page_num, "x": 0, "y": line["bbox"][1], "w": line["bbox"][0], "h": line["bbox"][3]-line["bbox"][1]})
+                is_bold = bool(line["spans"][0]["flags"] & 16)
+                if not is_bold:
+                    p_f.append(f"Підрозділ '{text[:20]}...' має бути жирним")
+                    highlights.append({"page": page_num, "x": line["bbox"][0], "y": line["bbox"][1], "w": line["bbox"][2]-line["bbox"][0], "h": line["bbox"][3]-line["bbox"][1]})
                 
-                sub_ls = [line]
-                c_idx = idx + 1
-                while c_idx < len(lines):
-                    l = lines[c_idx]
-                    if bool(l["spans"][0]["flags"] & 16) and abs(l["bbox"][0] - line["bbox"][0]) < 10: sub_ls.append(l); c_idx += 1
-                    else: break
+                indent = line["bbox"][0] - 2.5*CM
+                if abs(indent - 1.5*CM) > 0.5*CM:
+                    p_f.append("Відступ не 1.5 см")
+                    highlights.append({"page": page_num, "x": 0, "y": line["bbox"][1], "w": line["bbox"][0], "h": line["bbox"][3]-line["bbox"][1]})
                 
                 if idx > 0 and (line["bbox"][1] - lines[idx-1]["bbox"][3]) < 20:
-                    p_f.append("Відсутній рядок зверху"); highlights.append({"page": page_num, "x": 0, "y": line["bbox"][1]-20, "w": page.rect.width, "h": 20})
-                if c_idx < len(lines) and (lines[c_idx]["bbox"][1] - sub_ls[-1]["bbox"][3]) < 20:
-                    p_f.append("Відсутній рядок знизу"); highlights.append({"page": page_num, "x": 0, "y": sub_ls[-1]["bbox"][3], "w": page.rect.width, "h": 20})
+                    p_f.append("Відсутній рядок зверху")
+                    highlights.append({"page": page_num, "x": 0, "y": line["bbox"][1]-20, "w": page.rect.width, "h": 20})
+                
+                # Збираємо назву
+                sub_ls = [line]
+                curr = idx + 1
+                while curr < len(lines):
+                    l = lines[curr]
+                    if bool(l["spans"][0]["flags"] & 16) and abs(l["bbox"][0] - line["bbox"][0]) < 10:
+                        sub_ls.append(l); curr += 1
+                    else: break
+                
+                skip_until = curr - 1 # Пропускаємо рядки назви в наступних ітераціях
+                
+                if curr < len(lines) and (lines[curr]["bbox"][1] - sub_ls[-1]["bbox"][3]) < 20:
+                    p_f.append("Відсутній рядок знизу")
+                    highlights.append({"page": page_num, "x": 0, "y": sub_ls[-1]["bbox"][3], "w": page.rect.width, "h": 20})
+                
                 if p_f:
                     pages_with_errors.add(page_num)
                     for f in p_f: findings.append(f"Стор. {page_num}: {f}")
+                    
     return {"summary": "Підрозділи перевірено.", "findings": findings, "is_success": len(findings) == 0, "pages_with_errors": sorted(list(pages_with_errors)), "highlights": highlights}
 
 @app.post("/analyze")
