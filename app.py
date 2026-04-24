@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
+import fitz
 
 
 app = FastAPI(title="PDF Analyzer", version="1.0.0")
@@ -190,48 +191,36 @@ def analyze_zmist(rows: list[dict[str, Any]], page_width: float) -> dict[str, An
     }
 
 
-def check_top_right_region(rows: list[dict[str, Any]], page_width: float, page_height: float) -> str | None:
-    # Квадрат 3х3 см (приблизно 85-100 точок)
-    search_region = {
-        "xmin": page_width - 100,
-        "xmax": page_width + 100,
-        "ymin": page_height - 100,
-        "ymax": page_height + 100
-    }
-    
-    found_digits = ""
-    for row in rows:
-        if "spans" in row:
-            for span in row["spans"]:
-                if (search_region["xmin"] <= span["x"] <= search_region["xmax"] and 
-                    search_region["ymin"] <= span["y"] <= search_region["ymax"]):
-                    digits = re.sub(r"[^\d]", "", span["text"])
-                    if digits:
-                        found_digits += digits
-        else:
-            if (search_region["xmin"] <= row["x"] <= search_region["xmax"] and 
-                search_region["ymin"] <= row["y"] <= search_region["ymax"]):
-                digits = re.sub(r"[^\d]", "", row["clean"])
-                if digits:
-                    found_digits += digits
-                    
-    return found_digits if found_digits else None
-
-
-def analyze_page_numbers(reader: PdfReader) -> dict[str, Any]:
+def analyze_page_numbers(pdf_bytes: bytes) -> dict[str, Any]:
     findings = []
     
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        return {"summary": "Помилка читання PDF", "findings": [str(e)], "is_success": False}
+        
     for page_num in [1, 2, 3]:
-        if len(reader.pages) < page_num:
+        if page_num > len(doc):
             if page_num == 3:
                 findings.append("Неможливо перевірити 3-тю сторінку (у документі менше 3 сторінок).")
             continue
             
-        rows, page_width = extract_page_rows(reader, page_num)
-        page_height = float(reader.pages[page_num - 1].mediabox.top)
+        page = doc[page_num - 1]
+        rect = page.rect
+        # Кут 5х5 см. 1 см = ~28 точок. 5 см = 140 точок.
+        # В PyMuPDF координати від (0,0) у лівому ВЕРХНЬОМУ куті.
+        search_rect = fitz.Rect(rect.width - 150, 0, rect.width, 150)
         
-        digits = check_top_right_region(rows, page_width, page_height)
+        words = page.get_text("words")
         
+        digits = ""
+        for w in words:
+            word_rect = fitz.Rect(w[:4])
+            if word_rect.intersects(search_rect):
+                clean_word = re.sub(r"[^\d]", "", w[4])
+                if clean_word:
+                    digits += clean_word
+                    
         if page_num == 1:
             if digits:
                 findings.append(f"На титульній сторінці у правому верхньому куті знайдено цифри ({digits}). Їх там не повинно бути.")
@@ -240,7 +229,7 @@ def analyze_page_numbers(reader: PdfReader) -> dict[str, Any]:
                 findings.append(f"На сторінці змісту у правому верхньому куті знайдено цифри ({digits}). Їх там не повинно бути.")
         elif page_num == 3:
             if not digits:
-                findings.append("На 3-й сторінці не знайдено цифру у правому верхньому куті (зона 3х3 см).")
+                findings.append("На 3-й сторінці не знайдено цифру у правому верхньому куті (зона 5х5 см).")
             elif digits != "3":
                 findings.append(f'Номер на 3-й сторінці має бути "3", але знайдено "{digits}".')
                 
@@ -271,7 +260,7 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Unable to parse PDF.") from exc
 
     if request.analysis_type == "page_numbers":
-        result = analyze_page_numbers(reader)
+        result = analyze_page_numbers(pdf_bytes)
     else:
         rows, page_width = extract_page_rows(reader, request.page_number)
     
