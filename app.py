@@ -178,7 +178,7 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
 def analyze_chapters(doc: fitz.Document) -> dict[str, Any]:
     findings = []
     pages_with_errors = set()
-    for page_num in range(1, len(doc) + 1):
+    for page_num in range(3, len(doc) + 1):
         page = doc[page_num-1]
         blocks = page.get_text("dict")["blocks"]
         lines = []
@@ -230,6 +230,7 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
                 if not bool(line["spans"][0]["flags"] & 16): p_f.append("Підрозділ не жирний")
                 indent = line["bbox"][0] - 2.5*CM
                 if abs(indent - 1.5*CM) > 0.5*CM: p_f.append("Відступ не 1.5 см")
+                # Порожня строка зверху (тільки якщо не початок сторінки)
                 if idx > 0 and (line["bbox"][1] - lines[idx-1]["bbox"][3]) < 20: p_f.append("Відсутній рядок зверху")
                 if idx + 1 < len(lines) and (lines[idx+1]["bbox"][1] - line["bbox"][3]) < 20: p_f.append("Відсутній рядок знизу")
                 if p_f:
