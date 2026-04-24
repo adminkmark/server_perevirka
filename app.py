@@ -260,8 +260,15 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
     TARGET_INDENT = 1.5 * CM
     
     def is_major_heading(text: str) -> bool:
-        clean = re.sub(r"\s+", " ", text.strip()).upper()
-        return bool(re.match(r"^(ВСТУП|РОЗДІЛ\s+\d+|ВИСНОВКИ|ДОДАТКИ|СПИСОК ВИКОРИСТАНИХ ДЖЕРЕЛ)", clean))
+        clean = re.sub(r"\s+", " ", text.strip())
+        # Якщо це стандартний заголовок (ВСТУП, РОЗДІЛ...)
+        if bool(re.match(r"^(ВСТУП|РОЗДІЛ\s+\d+|ВИСНОВКИ|ДОДАТКИ|СПИСОК ВИКОРИСТАНИХ ДЖЕРЕЛ)", clean.upper())):
+            return True
+        # АБО якщо весь рядок складається з великих літер (мінімум 3 літери)
+        letters_only = re.sub(r"[^А-ЯІЄЇҐA-Z]", "", clean)
+        if len(letters_only) >= 3 and letters_only == letters_only.upper() and clean == clean.upper():
+            return True
+        return False
 
     def get_page_major_heading(page) -> str | None:
         blocks = page.get_text("dict")["blocks"]
@@ -333,11 +340,13 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
         if not text_lines:
             continue
 
-        page_findings = []
-        
-        # Для лівого поля ігноруємо центровані заголовки, жирні рядки та цифри
-        # Це дозволяє знайти реальну межу основного тексту (body text)
-        left_margin_lines = [l for l in text_lines if not (l.get("is_centered") or l.get("is_bold_or_digit"))]
+        # Для лівого поля ігноруємо центровані заголовки, жирні рядки, цифри 
+        # ТА занадто короткі рядки (які можуть бути частиною формул або відступами)
+        left_margin_lines = [
+            l for l in text_lines 
+            if not (l.get("is_centered") or l.get("is_bold_or_digit"))
+            and (l["bbox"][2] - l["bbox"][0]) > width * 0.3 # Ігноруємо занадто короткі "уривки"
+        ]
         
         # Якщо є звичайні рядки, рахуємо ліве поле по них. Інакше по всіх.
         ref_left = left_margin_lines if left_margin_lines else text_lines
@@ -349,7 +358,13 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
         # Верхнє поле рахуємо по ВСІХ рядках (включаючи ВСТУП, заголовки тощо)
         actual_top = min(l["bbox"][1] for l in text_lines)
         
-        actual_bottom_y = max(l["bbox"][3] for l in text_lines)
+        # Нижню межу тексту рахуємо з урахуванням тексту, таблиць та зображень!
+        # Це виправить помилку "Порожнє місце знизу", якщо там стоїть таблиця
+        elements_y = [l["bbox"][3] for l in text_lines]
+        elements_y.extend([t.y1 for t in table_bboxes])
+        elements_y.extend([img.y1 for img in img_bboxes])
+        
+        actual_bottom_y = max(elements_y) if elements_y else height
         actual_bottom = height - actual_bottom_y
 
         if abs(actual_left - TARGET_LEFT) > MARGIN_TOLERANCE:
@@ -364,12 +379,19 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
             page_findings.append(f"Верхнє поле {actual_top/CM:.1f} см замість 2.0 см")
             highlights.append({"page": page_num, "x": 0, "y": 0, "w": width, "h": actual_top})
 
-        if actual_bottom > 4.0 * CM:
+        if actual_bottom > 4.5 * CM: # Трохи збільшимо поріг до 4.5 см
             is_section_end = False
+            # Перевіряємо чи наступна сторінка починається з заголовка
             if page_num < len(doc):
                 next_page_heading = get_page_major_heading(doc[page_num])
                 if next_page_heading:
                     is_section_end = True
+            
+            # Також перевіряємо чи на поточній сторінці є заголовок ДОДАТКИ
+            current_heading = get_page_major_heading(page)
+            if current_heading and "ДОДАТКИ" in current_heading.upper():
+                is_section_end = True
+
             if not is_section_end:
                 page_findings.append(f"Порожнє місце знизу ({actual_bottom/CM:.1f} см). Не повинно бути.")
                 highlights.append({"page": page_num, "x": 0, "y": actual_bottom_y, "w": width, "h": actual_bottom})
