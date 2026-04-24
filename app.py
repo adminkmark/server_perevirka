@@ -52,13 +52,8 @@ def is_leader_fragment(text: str) -> bool:
     return not clean or re.fullmatch(r"[.\d\s\u2026_]+", clean) is not None
 
 def font_is_bold(font_name: str) -> bool:
-    if not font_name:
-        return False
-    # Ігноруємо загальні назви сімейств, шукаємо саме вказівку на жирність після дефісу або в кінці
-    name_low = font_name.lower()
-    if any(k in name_low for k in ["bold", "black", "heavy", "demi"]):
-        # Але переконуємося, що це не просто назва шрифту "Bold" (буває і таке)
-        return True
+    # Відключаємо перевірку за назвою, бо вона дає хибні результати в Змісті.
+    # Тепер довіряємо тільки прямому прапорцю flags & 4 (Bold).
     return False
 
 def extract_page_rows_fitz(doc: fitz.Document, page_number: int) -> tuple[list[dict[str, Any]], float]:
@@ -159,19 +154,24 @@ def analyze_zmist(rows: list[dict[str, Any]], page_width: float) -> dict[str, An
     if not major_rows: findings.append("Не знайдено основні розділи (ВСТУП, РОЗДІЛ...).")
 
     for row in major_rows:
-        # Отримуємо частину тексту ДО крапок або цифр в кінці
         text_part = re.split(r"[\.\u2026_]{3,}", row["text"])[0].strip()
-        # Тільки літери
         letters = re.sub(r"[^А-ЯІЄЇҐA-Z]", "", text_part)
         if letters and letters != letters.upper():
             findings.append(f'Пункт "{text_part[:30]}..." має бути ВЕЛИКИМИ ЛІТЕРАМИ.')
         
+        # Тепер ця перевірка буде набагато точнішою
         if not row["is_bold"]:
             findings.append(f'Розділ "{text_part[:30]}..." має бути ЖИРНИМ.')
 
     for row in sub_rows:
+        text_part = re.split(r"[\.\u2026_]{3,}", row["text"])[0].strip()
+        letters = re.sub(r"[^А-Яа-яІіЄєЇїҐґA-Za-z]", "", text_part)
+        if letters and letters == letters.upper() and len(letters) > 5:
+             findings.append(f'Підпункт "{text_part[:30]}..." не повинен бути ВЕЛИКИМИ ЛІТЕРАМИ.')
+        
+        # Якщо підпункт все ж таки жирний (через flags), видаємо зауваження
         if row["is_bold"]:
-            findings.append(f'Підпункт "{row["clean"][:30]}..." не повинен бути жирним.')
+            findings.append(f'Підпункт "{text_part[:30]}..." не повинен бути жирним.')
 
     return {
         "summary": "Перевірку змісту завершено.",
