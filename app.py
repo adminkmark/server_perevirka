@@ -242,6 +242,136 @@ def analyze_page_numbers(pdf_bytes: bytes) -> dict[str, Any]:
         "is_success": is_success
     }
 
+def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
+    findings = []
+    highlights = []
+    
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        return {"summary": "Помилка читання PDF", "findings": [str(e)], "is_success": False, "highlights": [], "pages_with_errors": []}
+        
+    CM = 28.346
+    MARGIN_TOLERANCE = 0.5 * CM
+    TARGET_LEFT = 2.5 * CM
+    TARGET_RIGHT = 1.0 * CM
+    TARGET_TOP = 2.0 * CM
+    TARGET_BOTTOM = 2.0 * CM
+    TARGET_INDENT = 1.5 * CM
+    
+    def is_major_heading(text: str) -> bool:
+        clean = re.sub(r"\s+", " ", text.strip()).upper()
+        return bool(re.match(r"^(ВСТУП|РОЗДІЛ\s+\d+|ВИСНОВКИ|ДОДАТКИ|СПИСОК ВИКОРИСТАНИХ ДЖЕРЕЛ)", clean))
+
+    def get_page_major_heading(page) -> str | None:
+        blocks = page.get_text("dict")["blocks"]
+        for b in blocks:
+            if "lines" not in b: continue
+            for l in b["lines"]:
+                text = "".join(s["text"] for s in l["spans"]).strip()
+                if is_major_heading(text):
+                    return text
+        return None
+
+    stop_page = len(doc) + 1
+    for i in range(2, len(doc)):
+        heading = get_page_major_heading(doc[i])
+        if heading and "ДОДАТКИ" in heading:
+            stop_page = i + 1
+            break
+
+    pages_with_errors = set()
+
+    for page_num in range(3, stop_page):
+        page = doc[page_num - 1]
+        width, height = page.rect.width, page.rect.height
+        
+        blocks = page.get_text("dict")["blocks"]
+        text_lines = []
+        for b in blocks:
+            if "lines" not in b: continue
+            for l in b["lines"]:
+                text = "".join(s["text"] for s in l["spans"]).strip()
+                if not text: continue
+                if re.fullmatch(r"\d+", text):
+                    if l["bbox"][1] < 100 or l["bbox"][3] > height - 100:
+                        continue
+                text_lines.append(l)
+
+        if not text_lines:
+            continue
+
+        page_findings = []
+        actual_left = min(l["bbox"][0] for l in text_lines)
+        actual_right = width - max(l["bbox"][2] for l in text_lines)
+        actual_top = min(l["bbox"][1] for l in text_lines)
+        actual_bottom_y = max(l["bbox"][3] for l in text_lines)
+        actual_bottom = height - actual_bottom_y
+
+        if abs(actual_left - TARGET_LEFT) > MARGIN_TOLERANCE:
+            page_findings.append(f"Ліве поле {actual_left/CM:.1f} см замість 2.5 см")
+            highlights.append({"page": page_num, "x": 0, "y": 0, "w": actual_left, "h": height})
+            
+        if actual_right < TARGET_RIGHT - MARGIN_TOLERANCE:
+            page_findings.append(f"Праве поле {actual_right/CM:.1f} см замість 1.0 см")
+            highlights.append({"page": page_num, "x": width - actual_right, "y": 0, "w": actual_right, "h": height})
+
+        if abs(actual_top - TARGET_TOP) > MARGIN_TOLERANCE:
+            page_findings.append(f"Верхнє поле {actual_top/CM:.1f} см замість 2.0 см")
+            highlights.append({"page": page_num, "x": 0, "y": 0, "w": width, "h": actual_top})
+
+        if actual_bottom > 4.0 * CM:
+            is_section_end = False
+            if page_num < len(doc):
+                next_page_heading = get_page_major_heading(doc[page_num])
+                if next_page_heading:
+                    is_section_end = True
+            if not is_section_end:
+                page_findings.append(f"Порожнє місце знизу ({actual_bottom/CM:.1f} см). Не повинно бути.")
+                highlights.append({"page": page_num, "x": 0, "y": actual_bottom_y, "w": width, "h": actual_bottom})
+        elif actual_bottom < TARGET_BOTTOM - MARGIN_TOLERANCE:
+            page_findings.append(f"Нижнє поле {actual_bottom/CM:.1f} см замість 2.0 см")
+            highlights.append({"page": page_num, "x": 0, "y": actual_bottom_y, "w": width, "h": actual_bottom})
+
+        indents = []
+        spacings = []
+        for i, l in enumerate(text_lines):
+            indent = l["bbox"][0] - actual_left
+            if indent > 10:
+                indents.append(indent)
+            if i > 0:
+                prev_l = text_lines[i-1]
+                if l["bbox"][1] > prev_l["bbox"][3]:
+                    spacing = l["bbox"][1] - prev_l["bbox"][1]
+                    if 15 < spacing < 40:
+                        spacings.append(spacing)
+
+        if indents:
+            avg_indent = sum(indents) / len(indents)
+            if abs(avg_indent - TARGET_INDENT) > MARGIN_TOLERANCE:
+                page_findings.append(f"Відступ першого рядка {avg_indent/CM:.1f} см замість 1.5 см")
+
+        if spacings:
+            avg_spacing = sum(spacings) / len(spacings)
+            if avg_spacing < 18.0 or avg_spacing > 24.0:
+                page_findings.append(f"Міжрядковий інтервал {avg_spacing:.1f} pt замість ~21 pt (1.5)")
+
+        if page_findings:
+            pages_with_errors.add(page_num)
+            for f in page_findings:
+                findings.append(f"Сторінка {page_num}: {f}")
+
+    is_success = len(findings) == 0
+    summary = "Загальний текст відповідає вимогам." if is_success else f"Виявлено помилки на {len(pages_with_errors)} сторінках."
+    
+    return {
+        "summary": summary,
+        "findings": findings,
+        "is_success": is_success,
+        "pages_with_errors": sorted(list(pages_with_errors)),
+        "highlights": highlights
+    }
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -261,6 +391,8 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     if request.analysis_type == "page_numbers":
         result = analyze_page_numbers(pdf_bytes)
+    elif request.analysis_type == "general_text":
+        result = analyze_general_text(pdf_bytes)
     else:
         rows, page_width = extract_page_rows(reader, request.page_number)
     
