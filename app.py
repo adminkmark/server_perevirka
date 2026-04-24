@@ -309,20 +309,24 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
                 text = "".join(s["text"] for s in l["spans"]).strip()
                 if not text: continue
                 
-                # Пропускаємо підписи до рисунків/таблиць
+                # Пропускаємо підписи та номери сторінок
                 if re.match(r"^(Рис|Табл|Рисунок|Таблиця)\.?\s+\d+", text, re.I):
                     continue
-
-                if re.fullmatch(r"\d+", text):
-                    if l["bbox"][1] < 100 or l["bbox"][3] > height - 100:
-                        continue
+                if re.fullmatch(r"\d+", text) and (l["bbox"][1] < 100 or l["bbox"][3] > height - 100):
+                    continue
                 
-                # Ігноруємо центрований текст (формули, розрахунки, заголовки) для аналізу відступів
+                # Додаємо всі валідні рядки
+                l["text_content"] = text
                 line_center = (l["bbox"][0] + l["bbox"][2]) / 2
                 page_center = width / 2
-                if abs(line_center - page_center) < 40: # Допуск центрування
-                    if (l["bbox"][2] - l["bbox"][0]) < width * 0.7: # Якщо рядок не на всю ширину
-                        continue
+                
+                # Помічаємо центровані рядки (заголовки, формули)
+                l["is_centered"] = abs(line_center - page_center) < 40 and (l["bbox"][2] - l["bbox"][0]) < width * 0.7
+                
+                # Помічаємо жирні/цифрові для лівого поля
+                first_span = l["spans"][0]
+                first_char = first_span["text"].strip()[0] if first_span["text"].strip() else ""
+                l["is_bold_or_digit"] = bool(first_span["flags"] & 4) or first_char.isdigit()
 
                 text_lines.append(l)
 
@@ -331,25 +335,18 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
 
         page_findings = []
         
-        # Для лівого поля ігноруємо рядки з жирним шрифтом або цифрами на початку
-        left_margin_lines = []
-        for l in text_lines:
-            first_span = l["spans"][0]
-            first_text = first_span["text"].strip()
-            first_char = first_text[0] if first_text else ""
-            is_bold = bool(first_span["flags"] & 4)
-            is_digit = first_char.isdigit()
-            if not (is_bold or is_digit):
-                left_margin_lines.append(l)
+        # Для лівого поля ігноруємо центровані заголовки, жирні рядки та цифри
+        # Це дозволяє знайти реальну межу основного тексту (body text)
+        left_margin_lines = [l for l in text_lines if not (l.get("is_centered") or l.get("is_bold_or_digit"))]
         
         # Якщо є звичайні рядки, рахуємо ліве поле по них. Інакше по всіх.
         ref_left = left_margin_lines if left_margin_lines else text_lines
         actual_left = min(l["bbox"][0] for l in ref_left)
         
-        # Праве поле рахуємо по тих самих рядках, що й ліве
+        # Праве поле так само по референтних рядках
         actual_right = width - max(l["bbox"][2] for l in ref_left)
         
-        # Верхнє поле рахуємо по ВСІХ рядках (включаючи жирні та цифри)
+        # Верхнє поле рахуємо по ВСІХ рядках (включаючи ВСТУП, заголовки тощо)
         actual_top = min(l["bbox"][1] for l in text_lines)
         
         actual_bottom_y = max(l["bbox"][3] for l in text_lines)
@@ -383,16 +380,11 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
         indents = []
         spacings = []
         for i, l in enumerate(text_lines):
-            # Відступ перевіряємо тільки для тексту, що НЕ починається з цифри і НЕ є жирним
-            first_span = l["spans"][0]
-            first_text = first_span["text"].strip()
-            first_char = first_text[0] if first_text else ""
-            is_bold = bool(first_span["flags"] & 4)
-            is_digit = first_char.isdigit()
-            
-            indent = l["bbox"][0] - actual_left
-            if indent > 10 and not is_bold and not is_digit:
-                indents.append(indent)
+            # Відступ перевіряємо тільки для тексту, що НЕ є центрованим, НЕ жирним і НЕ цифрою
+            if not (l.get("is_centered") or l.get("is_bold_or_digit")):
+                indent = l["bbox"][0] - actual_left
+                if indent > 10:
+                    indents.append(indent)
                 
             if i > 0:
                 prev_l = text_lines[i-1]
