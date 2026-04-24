@@ -176,6 +176,10 @@ def analyze_chapters(doc: fitz.Document) -> dict[str, Any]:
                 c_idx = idx + 1
                 while c_idx < len(lines):
                     l = lines[c_idx]
+                    l_text = "".join(s["text"] for s in l["spans"]).strip()
+                    # Якщо наступний рядок починається з цифри (підрозділ), назва розділу закінчилася
+                    if re.match(r"^\d+", l_text): break
+                    
                     if bool(l["spans"][0]["flags"] & 16) and abs((l["bbox"][0]+l["bbox"][2])/2 - page.rect.width/2) < 60:
                         title_lines.append(l); c_idx += 1
                     else: break
