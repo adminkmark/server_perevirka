@@ -3,14 +3,12 @@ from __future__ import annotations
 import base64
 import io
 import re
-from collections import defaultdict
 from statistics import mean
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from pypdf import PdfReader
 import fitz
 
 
@@ -40,59 +38,38 @@ def is_leader_fragment(text: str) -> bool:
     return not clean or re.fullmatch(r"[.\d\s]+", clean) is not None
 
 
-def font_is_bold(font_dict: dict[str, Any] | None) -> bool:
-    if not font_dict:
-        return False
+def extract_page_rows_fitz(doc: fitz.Document, page_number: int) -> tuple[list[dict[str, Any]], float]:
+    if page_number > len(doc):
+        raise HTTPException(status_code=400, detail=f"PDF has only {len(doc)} page(s).")
 
-    base_font = str(font_dict.get("/BaseFont", ""))
-    if re.search(r"bold|black|demi", base_font, re.IGNORECASE):
-        return True
-
-    descriptor = font_dict.get("/FontDescriptor")
-    if descriptor and isinstance(descriptor, dict):
-        try:
-            weight = int(descriptor.get("/FontWeight", 0))
-            if weight >= 600:
-                return True
-        except Exception:
-            pass
-
-    return False
-
-
-def extract_page_rows(reader: PdfReader, page_number: int) -> tuple[list[dict[str, Any]], float]:
-    if page_number > len(reader.pages):
-        raise HTTPException(status_code=400, detail=f"PDF has only {len(reader.pages)} page(s).")
-
-    page = reader.pages[page_number - 1]
-    page_width = float(page.mediabox.right) - float(page.mediabox.left)
+    page = doc[page_number - 1]
+    page_width = page.rect.width
+    
+    blocks = page.get_text("dict")["blocks"]
     spans: list[dict[str, Any]] = []
 
-    def visitor(text: str, cm: list[float], tm: list[float], font_dict: dict[str, Any] | None, font_size: float) -> None:
-        clean = normalize_text(text)
-        if not clean:
-            return
-
-        x = float(tm[4])
-        y = float(tm[5])
-        spans.append(
-            {
-                "text": clean,
-                "x": x,
-                "y": y,
-                "font_size": float(font_size),
-                "font_name": str((font_dict or {}).get("/BaseFont", "")),
-                "is_bold": font_is_bold(font_dict),
-            }
-        )
-
-    page.extract_text(visitor_text=visitor)
+    for b in blocks:
+        if "lines" not in b: continue
+        for l in b["lines"]:
+            for s in l["spans"]:
+                clean = normalize_text(s["text"])
+                if not clean: continue
+                
+                spans.append({
+                    "text": clean,
+                    "x": s["bbox"][0],
+                    "y": s["bbox"][1],
+                    "font_size": s["size"],
+                    "font_name": s["font"],
+                    "is_bold": bool(s["flags"] & 4)
+                })
 
     if not spans:
         return [], page_width
 
+    # Ггрупуємо в рядки
     buckets: list[dict[str, Any]] = []
-    for span in sorted(spans, key=lambda item: (-item["y"], item["x"])):
+    for span in sorted(spans, key=lambda item: (item["y"], item["x"])):
         row = next((item for item in buckets if abs(item["y"] - span["y"]) < 3), None)
         if row is None:
             row = {"y": span["y"], "spans": []}
@@ -110,18 +87,16 @@ def extract_page_rows(reader: PdfReader, page_number: int) -> tuple[list[dict[st
         if not content_spans:
             continue
 
-        rows.append(
-            {
-                "text": text,
-                "clean": text,
-                "x": min(span["x"] for span in content_spans),
-                "y": bucket["y"],
-                "font_size": mean(span["font_size"] for span in content_spans),
-                "font_names": sorted({span["font_name"] for span in content_spans if span["font_name"]}),
-                "is_bold": any(span["is_bold"] for span in content_spans),
-                "spans": content_spans,
-            }
-        )
+        rows.append({
+            "text": text,
+            "clean": text,
+            "x": min(span["x"] for span in content_spans),
+            "y": bucket["y"],
+            "font_size": mean(span["font_size"] for span in content_spans),
+            "font_names": sorted({span["font_name"] for span in content_spans if span["font_name"]}),
+            "is_bold": any(span["is_bold"] for span in content_spans),
+            "spans": content_spans,
+        })
 
     return rows, page_width
 
@@ -191,14 +166,9 @@ def analyze_zmist(rows: list[dict[str, Any]], page_width: float) -> dict[str, An
     }
 
 
-def analyze_page_numbers(pdf_bytes: bytes) -> dict[str, Any]:
+def analyze_page_numbers(doc: fitz.Document) -> dict[str, Any]:
     findings = []
     
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    except Exception as e:
-        return {"summary": "Помилка читання PDF", "findings": [str(e)], "is_success": False}
-        
     for page_num in [1, 2, 3]:
         if page_num > len(doc):
             if page_num == 3:
@@ -207,8 +177,6 @@ def analyze_page_numbers(pdf_bytes: bytes) -> dict[str, Any]:
             
         page = doc[page_num - 1]
         rect = page.rect
-        # Кут 2х2 см. 1 см = ~28 точок. 2 см = 60 точок.
-        # В PyMuPDF координати від (0,0) у лівому ВЕРХНЬОМУ куті.
         search_rect = fitz.Rect(rect.width - 60, 0, rect.width, 60)
         
         words = page.get_text("words")
@@ -242,15 +210,11 @@ def analyze_page_numbers(pdf_bytes: bytes) -> dict[str, Any]:
         "is_success": is_success
     }
 
-def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
+
+def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
     findings = []
     highlights = []
     
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    except Exception as e:
-        return {"summary": "Помилка читання PDF", "findings": [str(e)], "is_success": False, "highlights": [], "pages_with_errors": []}
-        
     CM = 28.346
     MARGIN_TOLERANCE = 0.5 * CM
     TARGET_LEFT = 2.5 * CM
@@ -261,10 +225,8 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
     
     def is_major_heading(text: str) -> bool:
         clean = re.sub(r"\s+", " ", text.strip())
-        # Якщо це стандартний заголовок (ВСТУП, РОЗДІЛ...)
         if bool(re.match(r"^(ВСТУП|РОЗДІЛ\s+\d+|ВИСНОВКИ|ДОДАТКИ|СПИСОК ВИКОРИСТАНИХ ДЖЕРЕЛ)", clean.upper())):
             return True
-        # АБО якщо весь рядок складається з великих літер (мінімум 3 літери)
         letters_only = re.sub(r"[^А-ЯІЄЇҐA-Z]", "", clean)
         if len(letters_only) >= 3 and letters_only == letters_only.upper() and clean == clean.upper():
             return True
@@ -293,7 +255,6 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
         page = doc[page_num - 1]
         width, height = page.rect.width, page.rect.height
         
-        # Знаходимо таблиці та рисунки, щоб ігнорувати текст у них
         tables = page.find_tables()
         table_bboxes = [fitz.Rect(t.bbox) for t in tables.tables]
         
@@ -304,69 +265,48 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
         text_lines = []
         for b in blocks:
             if "lines" not in b: continue
-            
             block_rect = fitz.Rect(b["bbox"])
-            # Пропускаємо, якщо текст у таблиці або біля рисунка
-            if any(block_rect.intersects(t_bbox) for t_bbox in table_bboxes):
-                continue
-            if any(block_rect.intersects(i_bbox) for i_bbox in img_bboxes):
-                continue
+            if any(block_rect.intersects(t_bbox) for t_bbox in table_bboxes): continue
+            if any(block_rect.intersects(i_bbox) for i_bbox in img_bboxes): continue
 
             for l in b["lines"]:
                 text = "".join(s["text"] for s in l["spans"]).strip()
                 if not text: continue
                 
-                # Пропускаємо підписи та номери сторінок
-                if re.match(r"^(Рис|Табл|Рисунок|Таблиця)\.?\s+\d+", text, re.I):
-                    continue
-                if re.fullmatch(r"\d+", text) and (l["bbox"][1] < 100 or l["bbox"][3] > height - 100):
-                    continue
+                if re.match(r"^(Рис|Табл|Рисунок|Таблиця)\.?\s+\d+", text, re.I): continue
+                if re.fullmatch(r"\d+", text) and (l["bbox"][1] < 100 or l["bbox"][3] > height - 100): continue
                 
-                # Додаємо всі валідні рядки
                 l["text_content"] = text
                 line_center = (l["bbox"][0] + l["bbox"][2]) / 2
                 page_center = width / 2
-                
-                # Помічаємо центровані рядки (заголовки, формули)
                 l["is_centered"] = abs(line_center - page_center) < 40 and (l["bbox"][2] - l["bbox"][0]) < width * 0.7
                 
-                # Помічаємо жирні/цифрові для лівого поля
                 first_span = l["spans"][0]
                 first_char = first_span["text"].strip()[0] if first_span["text"].strip() else ""
                 l["is_bold_or_digit"] = bool(first_span["flags"] & 4) or first_char.isdigit()
 
                 text_lines.append(l)
 
-        if not text_lines:
-            continue
+        if not text_lines: continue
 
-        # Для лівого поля ігноруємо центровані заголовки, жирні рядки, цифри 
-        # ТА занадто короткі рядки (які можуть бути частиною формул або відступами)
         left_margin_lines = [
             l for l in text_lines 
             if not (l.get("is_centered") or l.get("is_bold_or_digit"))
-            and (l["bbox"][2] - l["bbox"][0]) > width * 0.3 # Ігноруємо занадто короткі "уривки"
+            and (l["bbox"][2] - l["bbox"][0]) > width * 0.3
         ]
         
-        # Якщо є звичайні рядки, рахуємо ліве поле по них. Інакше по всіх.
         ref_left = left_margin_lines if left_margin_lines else text_lines
         actual_left = min(l["bbox"][0] for l in ref_left)
-        
-        # Праве поле так само по референтних рядках
         actual_right = width - max(l["bbox"][2] for l in ref_left)
-        
-        # Верхнє поле рахуємо по ВСІХ рядках (включаючи ВСТУП, заголовки тощо)
         actual_top = min(l["bbox"][1] for l in text_lines)
         
-        # Нижню межу тексту рахуємо з урахуванням тексту, таблиць та зображень!
-        # Це виправить помилку "Порожнє місце знизу", якщо там стоїть таблиця
         elements_y = [l["bbox"][3] for l in text_lines]
         elements_y.extend([t.y1 for t in table_bboxes])
         elements_y.extend([img.y1 for img in img_bboxes])
-        
         actual_bottom_y = max(elements_y) if elements_y else height
         actual_bottom = height - actual_bottom_y
 
+        page_findings = []
         if abs(actual_left - TARGET_LEFT) > MARGIN_TOLERANCE:
             page_findings.append(f"Ліве поле {actual_left/CM:.1f} см замість 2.5 см")
             highlights.append({"page": page_num, "x": 0, "y": 0, "w": actual_left, "h": height})
@@ -379,18 +319,14 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
             page_findings.append(f"Верхнє поле {actual_top/CM:.1f} см замість 2.0 см")
             highlights.append({"page": page_num, "x": 0, "y": 0, "w": width, "h": actual_top})
 
-        if actual_bottom > 4.5 * CM: # Трохи збільшимо поріг до 4.5 см
+        if actual_bottom > 4.5 * CM:
             is_section_end = False
-            # Перевіряємо чи наступна сторінка починається з заголовка
             if page_num < len(doc):
                 next_page_heading = get_page_major_heading(doc[page_num])
-                if next_page_heading:
-                    is_section_end = True
+                if next_page_heading: is_section_end = True
             
-            # Також перевіряємо чи на поточній сторінці є заголовок ДОДАТКИ
             current_heading = get_page_major_heading(page)
-            if current_heading and "ДОДАТКИ" in current_heading.upper():
-                is_section_end = True
+            if current_heading and "ДОДАТКИ" in current_heading.upper(): is_section_end = True
 
             if not is_section_end:
                 page_findings.append(f"Порожнє місце знизу ({actual_bottom/CM:.1f} см). Не повинно бути.")
@@ -402,18 +338,14 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
         indents = []
         spacings = []
         for i, l in enumerate(text_lines):
-            # Відступ перевіряємо тільки для тексту, що НЕ є центрованим, НЕ жирним і НЕ цифрою
             if not (l.get("is_centered") or l.get("is_bold_or_digit")):
                 indent = l["bbox"][0] - actual_left
-                if indent > 10:
-                    indents.append(indent)
-                
+                if indent > 10: indents.append(indent)
             if i > 0:
                 prev_l = text_lines[i-1]
                 if l["bbox"][1] > prev_l["bbox"][3]:
                     spacing = l["bbox"][1] - prev_l["bbox"][1]
-                    if 15 < spacing < 40:
-                        spacings.append(spacing)
+                    if 15 < spacing < 40: spacings.append(spacing)
 
         if indents:
             avg_indent = sum(indents) / len(indents)
@@ -422,7 +354,6 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
 
         if spacings:
             avg_spacing = sum(spacings) / len(spacings)
-            # Помилка тільки якщо інтервал менше 20 pt
             if avg_spacing < 20.0:
                 page_findings.append(f"Міжрядковий інтервал замалий ({avg_spacing:.1f} pt). Має бути 1.5 (~21 pt).")
 
@@ -442,6 +373,7 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
         "highlights": highlights
     }
 
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -455,27 +387,27 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid base64 PDF payload.") from exc
 
     try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as exc:
-        raise HTTPException(status_code=400, detail="Unable to parse PDF.") from exc
+        raise HTTPException(status_code=400, detail="Unable to parse PDF with PyMuPDF.") from exc
 
-    if request.analysis_type == "page_numbers":
-        result = analyze_page_numbers(pdf_bytes)
-    elif request.analysis_type == "general_text":
-        result = analyze_general_text(pdf_bytes)
-    else:
-        rows, page_width = extract_page_rows(reader, request.page_number)
-    
-        if request.analysis_type == "zmist":
+    try:
+        if request.analysis_type == "page_numbers":
+            result = analyze_page_numbers(doc)
+        elif request.analysis_type == "general_text":
+            result = analyze_general_text(doc)
+        elif request.analysis_type == "zmist":
+            rows, page_width = extract_page_rows_fitz(doc, request.page_number)
             result = analyze_zmist(rows, page_width)
         else:
             result = {
                 "summary": "Невідомий тип аналізу.",
                 "findings": [f'analysis_type "{request.analysis_type}" is not supported.'],
-                "rows": rows,
-                "metrics": {"page_width": page_width},
+                "is_success": False
             }
 
-    result["analysis_type"] = request.analysis_type
-    result["page_number"] = request.page_number
-    return result
+        result["analysis_type"] = request.analysis_type
+        result["page_number"] = request.page_number
+        return result
+    finally:
+        doc.close()
