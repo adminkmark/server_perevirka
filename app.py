@@ -336,9 +336,17 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
         indents = []
         spacings = []
         for i, l in enumerate(text_lines):
+            # Відступ перевіряємо тільки для тексту, що НЕ починається з цифри і НЕ є жирним
+            first_span = l["spans"][0]
+            first_text = first_span["text"].strip()
+            first_char = first_text[0] if first_text else ""
+            is_bold = bool(first_span["flags"] & 4)
+            is_digit = first_char.isdigit()
+            
             indent = l["bbox"][0] - actual_left
-            if indent > 10:
+            if indent > 10 and not is_bold and not is_digit:
                 indents.append(indent)
+                
             if i > 0:
                 prev_l = text_lines[i-1]
                 if l["bbox"][1] > prev_l["bbox"][3]:
@@ -353,8 +361,9 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
 
         if spacings:
             avg_spacing = sum(spacings) / len(spacings)
-            if avg_spacing < 18.0 or avg_spacing > 24.0:
-                page_findings.append(f"Міжрядковий інтервал {avg_spacing:.1f} pt замість ~21 pt (1.5)")
+            # Помилка тільки якщо інтервал менше 20 pt
+            if avg_spacing < 20.0:
+                page_findings.append(f"Міжрядковий інтервал замалий ({avg_spacing:.1f} pt). Має бути 1.5 (~21 pt).")
 
         if page_findings:
             pages_with_errors.add(page_num)
