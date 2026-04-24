@@ -207,9 +207,9 @@ def analyze_page_numbers(pdf_bytes: bytes) -> dict[str, Any]:
             
         page = doc[page_num - 1]
         rect = page.rect
-        # Кут 5х5 см. 1 см = ~28 точок. 5 см = 140 точок.
+        # Кут 2х2 см. 1 см = ~28 точок. 2 см = 60 точок.
         # В PyMuPDF координати від (0,0) у лівому ВЕРХНЬОМУ куті.
-        search_rect = fitz.Rect(rect.width - 150, 0, rect.width, 150)
+        search_rect = fitz.Rect(rect.width - 60, 0, rect.width, 60)
         
         words = page.get_text("words")
         
@@ -229,7 +229,7 @@ def analyze_page_numbers(pdf_bytes: bytes) -> dict[str, Any]:
                 findings.append(f"На сторінці змісту у правому верхньому куті знайдено цифри ({digits}). Їх там не повинно бути.")
         elif page_num == 3:
             if not digits:
-                findings.append("На 3-й сторінці не знайдено цифру у правому верхньому куті (зона 5х5 см).")
+                findings.append("На 3-й сторінці не знайдено цифру у правому верхньому куті (зона 2х2 см).")
             elif digits != "3":
                 findings.append(f'Номер на 3-й сторінці має бути "3", але знайдено "{digits}".')
                 
