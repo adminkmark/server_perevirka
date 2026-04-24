@@ -233,20 +233,34 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
                     p_f.append("Відсутній рядок зверху")
                     highlights.append({"page": page_num, "x": 0, "y": line["bbox"][1]-20, "w": page.rect.width, "h": 20})
                 
-                # Збираємо назву
+                # 4. Збираємо всю назву підрозділу
                 sub_ls = [line]
-                curr = idx + 1
-                while curr < len(lines):
-                    l = lines[curr]
-                    if bool(l["spans"][0]["flags"] & 16) and abs(l["bbox"][0] - line["bbox"][0]) < 10:
-                        sub_ls.append(l); curr += 1
-                    else: break
+                current_idx = idx + 1
+                while current_idx < len(lines):
+                    l = lines[current_idx]
+                    l_text = "".join(s["text"] for s in l["spans"]).strip()
+                    # Якщо наступний рядок починається з цифри (інший підрозділ), назва закінчилася
+                    if re.match(r"^\d+", l_text): break
+                    
+                    # Частиною назви вважаємо наступні жирні рядки
+                    is_l_bold = bool(l["spans"][0]["flags"] & 16)
+                    # Рядок може бути або з абзацом (як перший), або від лівого краю (page_left_boundary)
+                    is_correct_pos = abs(l["bbox"][0] - line["bbox"][0]) < 10 or abs(l["bbox"][0] - page_left_boundary) < 10
+                    
+                    if is_l_bold and is_correct_pos:
+                        sub_ls.append(l); current_idx += 1
+                    else:
+                        break
                 
-                skip_until = curr - 1 # Пропускаємо рядки назви в наступних ітераціях
+                skip_until = current_idx - 1 # Пропускаємо ці рядки в основному циклі
                 
-                if curr < len(lines) and (lines[curr]["bbox"][1] - sub_ls[-1]["bbox"][3]) < 20:
-                    p_f.append("Відсутній рядок знизу")
-                    highlights.append({"page": page_num, "x": 0, "y": sub_ls[-1]["bbox"][3], "w": page.rect.width, "h": 20})
+                # 5. Порожня строка знизу (після ОСТАННЬОГО рядка назви)
+                last_sub_line = sub_ls[-1]
+                if current_idx < len(lines):
+                    gap_below = lines[current_idx]["bbox"][1] - last_sub_line["bbox"][3]
+                    if gap_below < 20:
+                        p_f.append("Відсутній порожній рядок під назвою підрозділу")
+                        highlights.append({"page": page_num, "x": page_left_boundary, "y": last_sub_line["bbox"][3], "w": page.rect.width - page_left_boundary, "h": 20})
                 
                 if p_f:
                     pages_with_errors.add(page_num)
