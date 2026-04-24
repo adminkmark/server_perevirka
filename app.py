@@ -189,6 +189,77 @@ def analyze_zmist(rows: list[dict[str, Any]], page_width: float) -> dict[str, An
     }
 
 
+def extract_page_number_from_rows(rows: list[dict[str, Any]], search_region: dict[str, float] | None = None) -> dict[str, Any] | None:
+    def check_row(row):
+        if search_region:
+            if not (search_region["xmin"] <= row["x"] <= search_region["xmax"] and 
+                    search_region["ymin"] <= row["y"] <= search_region["ymax"]):
+                return None
+        
+        alpha = re.sub(r"[^A-Za-zА-Яа-яІіЄєЇїҐґ0-9]", "", row["clean"])
+        if re.fullmatch(r"\d{1,4}", alpha):
+            return {"text": alpha, "x": row["x"], "y": row["y"]}
+        return None
+
+    if search_region:
+        for row in rows:
+            num = check_row(row)
+            if num: return num
+    else:
+        for row in rows[:5]:
+            num = check_row(row)
+            if num: return num
+        for row in rows[-5:]:
+            num = check_row(row)
+            if num: return num
+            
+    return None
+
+
+def analyze_page_numbers(reader: PdfReader) -> dict[str, Any]:
+    findings = []
+    
+    if len(reader.pages) >= 1:
+        rows1, _ = extract_page_rows(reader, 1)
+        num1 = extract_page_number_from_rows(rows1)
+        if num1:
+            findings.append(f"На титульній сторінці знайдено номер ({num1['text']}). Нумерації там не повинно бути.")
+            
+    if len(reader.pages) >= 2:
+        rows2, _ = extract_page_rows(reader, 2)
+        num2 = extract_page_number_from_rows(rows2)
+        if num2:
+            findings.append(f"На сторінці змісту знайдено номер ({num2['text']}). Нумерації там не повинно бути.")
+            
+    if len(reader.pages) >= 3:
+        rows3, _ = extract_page_rows(reader, 3)
+        h3 = float(reader.pages[2].mediabox.top)
+        w3 = float(reader.pages[2].mediabox.right) - float(reader.pages[2].mediabox.left)
+        
+        search_region = {
+            "xmin": w3 - 100,
+            "xmax": w3 + 100,
+            "ymin": h3 - 100,
+            "ymax": h3 + 100
+        }
+        num3 = extract_page_number_from_rows(rows3, search_region)
+        if not num3:
+            findings.append("На 3-й сторінці не знайдено номер сторінки у правому верхньому куті (зона 3х3 см).")
+        else:
+            if num3["text"] != "3":
+                findings.append(f'Номер на 3-й сторінці має бути "3", але знайдено "{num3["text"]}".')
+    else:
+        findings.append("Неможливо перевірити 3-тю сторінку (у документі менше 3 сторінок).")
+        
+    is_success = len(findings) == 0
+    summary = "Нумерація сторінок відповідає вимогам." if is_success else "Виявлено помилки нумерації сторінок."
+    
+    return {
+        "summary": summary,
+        "findings": findings,
+        "is_success": is_success
+    }
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -206,17 +277,20 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Unable to parse PDF.") from exc
 
-    rows, page_width = extract_page_rows(reader, request.page_number)
-
-    if request.analysis_type == "zmist":
-        result = analyze_zmist(rows, page_width)
+    if request.analysis_type == "page_numbers":
+        result = analyze_page_numbers(reader)
     else:
-        result = {
-            "summary": "Невідомий тип аналізу.",
-            "findings": [f'analysis_type "{request.analysis_type}" is not supported.'],
-            "rows": rows,
-            "metrics": {"page_width": page_width},
-        }
+        rows, page_width = extract_page_rows(reader, request.page_number)
+    
+        if request.analysis_type == "zmist":
+            result = analyze_zmist(rows, page_width)
+        else:
+            result = {
+                "summary": "Невідомий тип аналізу.",
+                "findings": [f'analysis_type "{request.analysis_type}" is not supported.'],
+                "rows": rows,
+                "metrics": {"page_width": page_width},
+            }
 
     result["analysis_type"] = request.analysis_type
     result["page_number"] = request.page_number
