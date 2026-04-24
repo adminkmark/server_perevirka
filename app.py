@@ -330,9 +330,28 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
             continue
 
         page_findings = []
-        actual_left = min(l["bbox"][0] for l in text_lines)
-        actual_right = width - max(l["bbox"][2] for l in text_lines)
+        
+        # Для лівого поля ігноруємо рядки з жирним шрифтом або цифрами на початку
+        left_margin_lines = []
+        for l in text_lines:
+            first_span = l["spans"][0]
+            first_text = first_span["text"].strip()
+            first_char = first_text[0] if first_text else ""
+            is_bold = bool(first_span["flags"] & 4)
+            is_digit = first_char.isdigit()
+            if not (is_bold or is_digit):
+                left_margin_lines.append(l)
+        
+        # Якщо є звичайні рядки, рахуємо ліве поле по них. Інакше по всіх.
+        ref_left = left_margin_lines if left_margin_lines else text_lines
+        actual_left = min(l["bbox"][0] for l in ref_left)
+        
+        # Праве поле рахуємо по тих самих рядках, що й ліве
+        actual_right = width - max(l["bbox"][2] for l in ref_left)
+        
+        # Верхнє поле рахуємо по ВСІХ рядках (включаючи жирні та цифри)
         actual_top = min(l["bbox"][1] for l in text_lines)
+        
         actual_bottom_y = max(l["bbox"][3] for l in text_lines)
         actual_bottom = height - actual_bottom_y
 
