@@ -190,78 +190,60 @@ def analyze_zmist(rows: list[dict[str, Any]], page_width: float) -> dict[str, An
     }
 
 
-def extract_page_number_from_rows(rows: list[dict[str, Any]], search_region: dict[str, float] | None = None) -> dict[str, Any] | None:
-    def is_pure_number(text: str) -> str | None:
-        alpha = re.sub(r"[^A-Za-zА-Яа-яІіЄєЇїҐґ0-9]", "", text)
-        if re.fullmatch(r"\d{1,4}", alpha):
-            return alpha
-        return None
-
-    def in_region(x: float, y: float) -> bool:
-        if not search_region:
-            return True
-        return (search_region["xmin"] <= x <= search_region["xmax"] and 
-                search_region["ymin"] <= y <= search_region["ymax"])
-
-    if search_region:
-        for row in rows:
-            if in_region(row["x"], row["y"]):
-                num_text = is_pure_number(row["clean"])
-                if num_text:
-                    return {"text": num_text, "x": row["x"], "y": row["y"]}
-            
-            if "spans" in row:
-                for span in row["spans"]:
-                    if in_region(span["x"], span["y"]):
-                        num_text = is_pure_number(span["text"])
-                        if num_text:
-                            return {"text": num_text, "x": span["x"], "y": span["y"]}
-    else:
-        for row in rows[:5]:
-            num_text = is_pure_number(row["clean"])
-            if num_text: return {"text": num_text, "x": row["x"], "y": row["y"]}
-        for row in rows[-5:]:
-            num_text = is_pure_number(row["clean"])
-            if num_text: return {"text": num_text, "x": row["x"], "y": row["y"]}
-            
-    return None
+def check_top_right_region(rows: list[dict[str, Any]], page_width: float, page_height: float) -> str | None:
+    # Квадрат 3х3 см (приблизно 85-100 точок)
+    search_region = {
+        "xmin": page_width - 100,
+        "xmax": page_width + 100,
+        "ymin": page_height - 100,
+        "ymax": page_height + 100
+    }
+    
+    found_digits = ""
+    for row in rows:
+        if "spans" in row:
+            for span in row["spans"]:
+                if (search_region["xmin"] <= span["x"] <= search_region["xmax"] and 
+                    search_region["ymin"] <= span["y"] <= search_region["ymax"]):
+                    digits = re.sub(r"[^\d]", "", span["text"])
+                    if digits:
+                        found_digits += digits
+        else:
+            if (search_region["xmin"] <= row["x"] <= search_region["xmax"] and 
+                search_region["ymin"] <= row["y"] <= search_region["ymax"]):
+                digits = re.sub(r"[^\d]", "", row["clean"])
+                if digits:
+                    found_digits += digits
+                    
+    return found_digits if found_digits else None
 
 
 def analyze_page_numbers(reader: PdfReader) -> dict[str, Any]:
     findings = []
     
-    if len(reader.pages) >= 1:
-        rows1, _ = extract_page_rows(reader, 1)
-        num1 = extract_page_number_from_rows(rows1)
-        if num1:
-            findings.append(f"На титульній сторінці знайдено номер ({num1['text']}). Нумерації там не повинно бути.")
+    for page_num in [1, 2, 3]:
+        if len(reader.pages) < page_num:
+            if page_num == 3:
+                findings.append("Неможливо перевірити 3-тю сторінку (у документі менше 3 сторінок).")
+            continue
             
-    if len(reader.pages) >= 2:
-        rows2, _ = extract_page_rows(reader, 2)
-        num2 = extract_page_number_from_rows(rows2)
-        if num2:
-            findings.append(f"На сторінці змісту знайдено номер ({num2['text']}). Нумерації там не повинно бути.")
-            
-    if len(reader.pages) >= 3:
-        rows3, _ = extract_page_rows(reader, 3)
-        h3 = float(reader.pages[2].mediabox.top)
-        w3 = float(reader.pages[2].mediabox.right) - float(reader.pages[2].mediabox.left)
+        rows, page_width = extract_page_rows(reader, page_num)
+        page_height = float(reader.pages[page_num - 1].mediabox.top)
         
-        search_region = {
-            "xmin": w3 - 100,
-            "xmax": w3 + 100,
-            "ymin": h3 - 100,
-            "ymax": h3 + 100
-        }
-        num3 = extract_page_number_from_rows(rows3, search_region)
-        if not num3:
-            findings.append("На 3-й сторінці не знайдено номер сторінки у правому верхньому куті (зона 3х3 см).")
-        else:
-            if num3["text"] != "3":
-                findings.append(f'Номер на 3-й сторінці має бути "3", але знайдено "{num3["text"]}".')
-    else:
-        findings.append("Неможливо перевірити 3-тю сторінку (у документі менше 3 сторінок).")
+        digits = check_top_right_region(rows, page_width, page_height)
         
+        if page_num == 1:
+            if digits:
+                findings.append(f"На титульній сторінці у правому верхньому куті знайдено цифри ({digits}). Їх там не повинно бути.")
+        elif page_num == 2:
+            if digits:
+                findings.append(f"На сторінці змісту у правому верхньому куті знайдено цифри ({digits}). Їх там не повинно бути.")
+        elif page_num == 3:
+            if not digits:
+                findings.append("На 3-й сторінці не знайдено цифру у правому верхньому куті (зона 3х3 см).")
+            elif digits != "3":
+                findings.append(f'Номер на 3-й сторінці має бути "3", але знайдено "{digits}".')
+                
     is_success = len(findings) == 0
     summary = "Нумерація сторінок відповідає вимогам." if is_success else "Виявлено помилки нумерації сторінок."
     
