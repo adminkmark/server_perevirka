@@ -217,10 +217,13 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
                     p_f.append(f"Підрозділ '{text[:20]}...' має бути жирним")
                     highlights.append({"page": page_num, "x": line["bbox"][0], "y": line["bbox"][1], "w": line["bbox"][2]-line["bbox"][0], "h": line["bbox"][3]-line["bbox"][1]})
                 
-                indent = line["bbox"][0] - 2.5*CM
-                if abs(indent - 1.5*CM) > 0.5*CM:
-                    p_f.append("Відступ не 1.5 см")
-                    highlights.append({"page": page_num, "x": 0, "y": line["bbox"][1], "w": line["bbox"][0], "h": line["bbox"][3]-line["bbox"][1]})
+                # 2. Абзацний відступ (1.5 см від лівого поля 2.5 см = 4.0 см від краю)
+                # Допускаємо невелику похибку 0.2 см
+                current_x = line["bbox"][0]
+                expected_x = (2.5 + 1.5) * CM
+                if abs(current_x - expected_x) > 0.2 * CM:
+                    p_f.append(f"Відступ має бути 1.5 см (зараз { (current_x/CM - 2.5):.1f} см)")
+                    highlights.append({"page": page_num, "x": 0, "y": line["bbox"][1], "w": current_x, "h": line["bbox"][3]-line["bbox"][1]})
                 
                 if idx > 0 and (line["bbox"][1] - lines[idx-1]["bbox"][3]) < 20:
                     p_f.append("Відсутній рядок зверху")
