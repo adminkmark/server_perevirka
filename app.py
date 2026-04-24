@@ -192,7 +192,8 @@ def analyze_chapters(doc: fitz.Document) -> dict[str, Any]:
             text = "".join(s["text"] for s in line["spans"]).strip()
             if re.match(r"^РОЗДІЛ\s+\d+", text.upper()):
                 p_f = []
-                if idx > 0 and lines[idx-1]["bbox"][1] > 100: p_f.append("РОЗДІЛ не з нової сторінки")
+                # Перевіряємо чи РОЗДІЛ справді зверху (не нижче 120pt від краю)
+                if line["bbox"][1] > 120: p_f.append("РОЗДІЛ має починатися з нової сторінки")
                 line_center = (line["bbox"][0] + line["bbox"][2]) / 2
                 if abs(line_center - page.rect.width/2) > 45: p_f.append("РОЗДІЛ не по центру")
                 if text != text.upper() or not bool(line["spans"][0]["flags"] & 16): p_f.append("РОЗДІЛ має бути ВЕЛИКИМИ ЖИРНИМИ")
@@ -203,8 +204,12 @@ def analyze_chapters(doc: fitz.Document) -> dict[str, Any]:
                     if abs((next_l["bbox"][0]+next_l["bbox"][2])/2 - page.rect.width/2) > 45: p_f.append("Назва не по центру")
                     if next_t != next_t.upper() or not bool(next_l["spans"][0]["flags"] & 16): p_f.append("Назва має бути ВЕЛИКИМИ ЖИРНИМИ")
                     if next_t.endswith("."): p_f.append("Крапка в кінці назви")
-                    if idx + 2 < len(lines) and (lines[idx+2]["bbox"][1] - next_l["bbox"][3]) < 20: p_f.append("Відсутній порожній рядок після назви")
+                    # Перевірка на порожній рядок (відстань до наступного тексту > 20pt)
+                    if idx + 2 < len(lines):
+                        gap = lines[idx+2]["bbox"][1] - next_l["bbox"][3]
+                        if gap < 20.0: p_f.append("Відсутній порожній рядок після назви")
                 else: p_f.append("Не знайдено назву розділу")
+                
                 if p_f:
                     pages_with_errors.add(page_num)
                     for f in p_f: findings.append(f"Стор. {page_num}: {f}")
