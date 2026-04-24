@@ -286,16 +286,44 @@ def analyze_general_text(pdf_bytes: bytes) -> dict[str, Any]:
         page = doc[page_num - 1]
         width, height = page.rect.width, page.rect.height
         
+        # Знаходимо таблиці та рисунки, щоб ігнорувати текст у них
+        tables = page.find_tables()
+        table_bboxes = [fitz.Rect(t.bbox) for t in tables.tables]
+        
+        img_info = page.get_image_info()
+        img_bboxes = [fitz.Rect(img["bbox"]) for img in img_info]
+
         blocks = page.get_text("dict")["blocks"]
         text_lines = []
         for b in blocks:
             if "lines" not in b: continue
+            
+            block_rect = fitz.Rect(b["bbox"])
+            # Пропускаємо, якщо текст у таблиці або біля рисунка
+            if any(block_rect.intersects(t_bbox) for t_bbox in table_bboxes):
+                continue
+            if any(block_rect.intersects(i_bbox) for i_bbox in img_bboxes):
+                continue
+
             for l in b["lines"]:
                 text = "".join(s["text"] for s in l["spans"]).strip()
                 if not text: continue
+                
+                # Пропускаємо підписи до рисунків/таблиць
+                if re.match(r"^(Рис|Табл|Рисунок|Таблиця)\.?\s+\d+", text, re.I):
+                    continue
+
                 if re.fullmatch(r"\d+", text):
                     if l["bbox"][1] < 100 or l["bbox"][3] > height - 100:
                         continue
+                
+                # Ігноруємо центрований текст (формули, розрахунки, заголовки) для аналізу відступів
+                line_center = (l["bbox"][0] + l["bbox"][2]) / 2
+                page_center = width / 2
+                if abs(line_center - page_center) < 40: # Допуск центрування
+                    if (l["bbox"][2] - l["bbox"][0]) < width * 0.7: # Якщо рядок не на всю ширину
+                        continue
+
                 text_lines.append(l)
 
         if not text_lines:
