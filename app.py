@@ -209,8 +209,8 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
             if idx <= skip_until: continue
             
             text = "".join(s["text"] for s in line["spans"]).strip()
-            # Патерн n.n або n.n. Текст
-            if re.match(r"^\d+\.\d+\.?\s+", text):
+            # Патерн виключно 1.1 - 3.3
+            if re.match(r"^[1-3]\.[1-3]\.?\s+", text):
                 p_f = []
                 is_bold = bool(line["spans"][0]["flags"] & 16)
                 if not is_bold:
