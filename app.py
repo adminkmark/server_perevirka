@@ -242,23 +242,24 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
         img_bboxes = [fitz.Rect(img["bbox"]) for img in img_info]
 
         blocks = page.get_text("dict")["blocks"]
-        text_lines = []
+        all_elements = []
+        paragraph_lines = []
+        
         for b in blocks:
             if "lines" not in b: continue
-            block_rect = fitz.Rect(b["bbox"])
-            if any(block_rect.intersects(t_bbox) for t_bbox in table_bboxes): continue
-            if any(block_rect.intersects(i_bbox) for i_bbox in img_bboxes): continue
             for l in b["lines"]:
                 text = "".join(s["text"] for s in l["spans"]).strip()
                 if not text: continue
 
-                # Ігноруємо номери сторінок (тільки цифри у верхній або нижній частині)
+                # Номери сторінок ігноруємо завжди
                 if text.isdigit() and (l["bbox"][1] < 60 or l["bbox"][3] > height - 60):
                     continue
 
-                # Ігноруємо Таблиця ..., Рис ...
+                # Додаємо до всіх елементів (для розрахунку полів)
+                all_elements.append(l)
+
+                # Фільтруємо для перевірки абзаців
                 if re.match(r"^(Рис|Табл|Рисунок|Таблиця|Джерело)\.?\s*", text, re.I): continue
-                # Ігноруємо формули (рядки з математичними символами та малою кількістю літер)
                 letters_count = len(re.sub(r"[^А-Яа-яІіЄєЇїҐґA-Za-z]", "", text))
                 if letters_count < 10 and any(c in text for c in "=+-*/∑∫√^"): continue
                 
@@ -270,33 +271,44 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
                 l["is_bold"] = bool(first_span["flags"] & 4) or font_is_bold(first_span["font"])
                 l["starts_with_digit"] = text[0].isdigit()
 
-                text_lines.append(l)
+                paragraph_lines.append(l)
 
-        if not text_lines: continue
+        if not all_elements: continue
 
-        # Ліве поле рахуємо по звичайному тексту (не заголовки, не формули, не центровані)
-        left_margin_lines = [l for l in text_lines if not (l.get("is_centered") or l.get("is_bold") or l.get("starts_with_digit")) and (l["bbox"][2] - l["bbox"][0]) > width * 0.4]
+        # Розрахунок полів по ВСІХ елементах (текст, таблиці, рисунки)
+        all_y_tops = [l["bbox"][1] for l in all_elements]
+        all_y_bottoms = [l["bbox"][3] for l in all_elements]
+        all_x_lefts = [l["bbox"][0] for l in all_elements]
+        all_x_rights = [l["bbox"][2] for l in all_elements]
         
-        ref_left = left_margin_lines if left_margin_lines else text_lines
-        actual_left = min(l["bbox"][0] for l in ref_left)
-        actual_right = width - max(l["bbox"][2] for l in ref_left)
-        actual_top = min(l["bbox"][1] for l in text_lines)
-        elements_y = [l["bbox"][3] for l in text_lines]
-        elements_y.extend([t.y1 for t in table_bboxes])
-        elements_y.extend([img.y1 for img in img_bboxes])
-        actual_bottom_y = max(elements_y) if elements_y else height
+        # Додаємо бокси таблиць та рисунків до розрахунку полів
+        for t_bbox in table_bboxes:
+            all_y_tops.append(t_bbox.y0); all_y_bottoms.append(t_bbox.y1)
+            all_x_lefts.append(t_bbox.x0); all_x_rights.append(t_bbox.x1)
+        for i_bbox in img_bboxes:
+            all_y_tops.append(i_bbox.y0); all_y_bottoms.append(i_bbox.y1)
+            all_x_lefts.append(i_bbox.x0); all_x_rights.append(i_bbox.x1)
+
+        actual_top = min(all_y_tops) if all_y_tops else 0
+        actual_bottom_y = max(all_y_bottoms) if all_y_bottoms else height
         actual_bottom = height - actual_bottom_y
+        
+        # Ліве/праве поля рахуємо по "масиву" тексту, щоб не чіплятися за випадкові крапки
+        actual_left = min(all_x_lefts) if all_x_lefts else TARGET_LEFT
+        actual_right = width - (max(all_x_rights) if all_x_rights else width - TARGET_RIGHT)
 
         page_findings = []
-        if abs(actual_left - TARGET_LEFT) > MARGIN_TOLERANCE:
-            page_findings.append(f"Ліве поле {actual_left/CM:.1f} см замість 2.5 см")
-            highlights.append({"page": page_num, "x": 0, "y": 0, "w": actual_left, "h": height})
-        if actual_right < TARGET_RIGHT - MARGIN_TOLERANCE:
-            page_findings.append(f"Праве поле {actual_right/CM:.1f} см замість 1.0 см")
-            highlights.append({"page": page_num, "x": width - actual_right, "y": 0, "w": actual_right, "h": height})
         if abs(actual_top - TARGET_TOP) > MARGIN_TOLERANCE:
             page_findings.append(f"Верхнє поле {actual_top/CM:.1f} см замість 2.0 см")
             highlights.append({"page": page_num, "x": 0, "y": 0, "w": width, "h": actual_top})
+        
+        if abs(actual_left - TARGET_LEFT) > MARGIN_TOLERANCE:
+            page_findings.append(f"Ліве поле {actual_left/CM:.1f} см замість 2.5 см")
+            highlights.append({"page": page_num, "x": 0, "y": 0, "w": actual_left, "h": height})
+
+        if actual_right < TARGET_RIGHT - MARGIN_TOLERANCE:
+            page_findings.append(f"Праве поле {actual_right/CM:.1f} см замість 1.0 см")
+            highlights.append({"page": page_num, "x": width - actual_right, "y": 0, "w": actual_right, "h": height})
         
         # Порожнє місце знизу
         if actual_bottom > 4.5 * CM:
@@ -308,10 +320,9 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
                 page_findings.append(f"Порожнє місце знизу ({actual_bottom/CM:.1f} см).")
                 highlights.append({"page": page_num, "x": 0, "y": actual_bottom_y, "w": width, "h": actual_bottom})
 
-        # Відступи абзаців
+        # Відступи абзаців рахуємо по paragraph_lines
         indents = []
-        for i, l in enumerate(text_lines):
-            # Тільки для довгих рядків основного тексту
+        for l in paragraph_lines:
             if not (l.get("is_centered") or l.get("is_bold") or l.get("starts_with_digit")) and (l["bbox"][2] - l["bbox"][0]) > width * 0.5:
                 indent = l["bbox"][0] - actual_left
                 if 10 < indent < 80: # Нормальний діапазон для абзацу
