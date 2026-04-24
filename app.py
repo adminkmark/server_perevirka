@@ -204,6 +204,10 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
         blocks = page.get_text("dict")["blocks"]
         lines = [l for b in blocks if "lines" in b for l in b["lines"] if "".join(s["text"] for s in l["spans"]).strip()]
         
+        # Визначаємо "границю загального тексту" для цієї сторінки
+        normal_lines_x = [l["bbox"][0] for l in lines if not re.match(r"^[1-3]\.[1-3]\.?\s+", "".join(s["text"] for s in l["spans"]).strip()) and abs((l["bbox"][0]+l["bbox"][2])/2 - page.rect.width/2) > 50]
+        page_left_boundary = min(normal_lines_x) if normal_lines_x else 2.5 * CM
+        
         skip_until = -1
         for idx, line in enumerate(lines):
             if idx <= skip_until: continue
@@ -212,18 +216,18 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
             # Патерн виключно 1.1 - 3.3
             if re.match(r"^[1-3]\.[1-3]\.?\s+", text):
                 p_f = []
+                # 1. Жирний
                 is_bold = bool(line["spans"][0]["flags"] & 16)
                 if not is_bold:
                     p_f.append(f"Підрозділ '{text[:20]}...' має бути жирним")
                     highlights.append({"page": page_num, "x": line["bbox"][0], "y": line["bbox"][1], "w": line["bbox"][2]-line["bbox"][0], "h": line["bbox"][3]-line["bbox"][1]})
                 
-                # 2. Абзацний відступ (1.5 см від лівого поля 2.5 см = 4.0 см від краю)
-                # Допускаємо невелику похибку 0.2 см
+                # 2. Абзацний відступ (1.5 см від ГРАНИЦІ ТЕКСТУ)
                 current_x = line["bbox"][0]
-                expected_x = (2.5 + 1.5) * CM
+                expected_x = page_left_boundary + 1.5 * CM
                 if abs(current_x - expected_x) > 0.2 * CM:
-                    p_f.append(f"Відступ має бути 1.5 см (зараз { (current_x/CM - 2.5):.1f} см)")
-                    highlights.append({"page": page_num, "x": 0, "y": line["bbox"][1], "w": current_x, "h": line["bbox"][3]-line["bbox"][1]})
+                    p_f.append(f"Відступ має бути 1.5 см від межі тексту (зараз { (current_x - page_left_boundary)/CM:.1f} см)")
+                    highlights.append({"page": page_num, "x": page_left_boundary, "y": line["bbox"][1], "w": current_x - page_left_boundary, "h": line["bbox"][3]-line["bbox"][1]})
                 
                 if idx > 0 and (line["bbox"][1] - lines[idx-1]["bbox"][3]) < 20:
                     p_f.append("Відсутній рядок зверху")
