@@ -72,16 +72,17 @@ def extract_page_rows_fitz(doc: fitz.Document, page_number: int) -> tuple[list[d
                 txt = s["text"].strip()
                 if not txt: continue
                 
-                # Визначаємо жирність конкретного спана
-                bold_flag = bool(s["flags"] & 4)
-                bold_name = font_is_bold(s["font"])
+                fname = s["font"].lower()
+                # bit 4 (value 16) is BOLD in PyMuPDF flags
+                is_bold_flag = bool(s["flags"] & 16)
+                is_bold_name = any(k in fname for k in ["bold", "black", "heavy"])
                 
                 all_spans.append({
                     "text": txt,
                     "x": s["bbox"][0],
                     "y": s["bbox"][1],
                     "font_size": s["size"],
-                    "is_bold": bold_flag or bold_name
+                    "is_bold": is_bold_flag or is_bold_name
                 })
 
     if not all_spans: return [], page_width
@@ -102,8 +103,7 @@ def extract_page_rows_fitz(doc: fitz.Document, page_number: int) -> tuple[list[d
             
         full_text = " ".join(s["text"] for s in content_spans)
         
-        # Рядок вважається жирним, якщо ТЕКСТОВІ спани жирні
-        # (ігноруємо жирність крапок або номерів сторінок в кінці)
+        # Перевіряємо жирність ТЕКСТОВИХ спанів
         text_spans = [s for s in content_spans if re.search(r"[А-Яа-яІіЄєЇїҐґA-Za-z]", s["text"])]
         is_row_bold = any(s["is_bold"] for s in text_spans) if text_spans else any(s["is_bold"] for s in content_spans)
 
@@ -159,7 +159,6 @@ def analyze_zmist(rows: list[dict[str, Any]], page_width: float) -> dict[str, An
         if letters and letters != letters.upper():
             findings.append(f'Пункт "{text_part[:30]}..." має бути ВЕЛИКИМИ ЛІТЕРАМИ.')
         
-        # Тепер ця перевірка буде набагато точнішою
         if not row["is_bold"]:
             findings.append(f'Розділ "{text_part[:30]}..." має бути ЖИРНИМ.')
 
@@ -169,7 +168,6 @@ def analyze_zmist(rows: list[dict[str, Any]], page_width: float) -> dict[str, An
         if letters and letters == letters.upper() and len(letters) > 5:
              findings.append(f'Підпункт "{text_part[:30]}..." не повинен бути ВЕЛИКИМИ ЛІТЕРАМИ.')
         
-        # Якщо підпункт все ж таки жирний (через flags), видаємо зауваження
         if row["is_bold"]:
             findings.append(f'Підпункт "{text_part[:30]}..." не повинен бути жирним.')
 
