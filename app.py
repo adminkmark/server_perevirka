@@ -54,7 +54,12 @@ def is_leader_fragment(text: str) -> bool:
 def font_is_bold(font_name: str) -> bool:
     if not font_name:
         return False
-    return any(keyword in font_name.lower() for keyword in ["bold", "black", "demi", "heavy"])
+    # Ігноруємо загальні назви сімейств, шукаємо саме вказівку на жирність після дефісу або в кінці
+    name_low = font_name.lower()
+    if any(k in name_low for k in ["bold", "black", "heavy", "demi"]):
+        # Але переконуємося, що це не просто назва шрифту "Bold" (буває і таке)
+        return True
+    return False
 
 def extract_page_rows_fitz(doc: fitz.Document, page_number: int) -> tuple[list[dict[str, Any]], float]:
     if page_number > len(doc):
@@ -71,19 +76,22 @@ def extract_page_rows_fitz(doc: fitz.Document, page_number: int) -> tuple[list[d
             for s in l["spans"]:
                 txt = s["text"].strip()
                 if not txt: continue
+                
+                # Визначаємо жирність конкретного спана
+                bold_flag = bool(s["flags"] & 4)
+                bold_name = font_is_bold(s["font"])
+                
                 all_spans.append({
                     "text": txt,
                     "x": s["bbox"][0],
                     "y": s["bbox"][1],
                     "font_size": s["size"],
-                    "font_name": s["font"],
-                    "is_bold": bool(s["flags"] & 4) or font_is_bold(s["font"])
+                    "is_bold": bold_flag or bold_name
                 })
 
     if not all_spans: return [], page_width
 
-    # Групуємо в рядки
-    buckets: list[dict[str, Any]] = []
+    buckets = []
     for span in sorted(all_spans, key=lambda x: (x["y"], x["x"])):
         row = next((item for item in buckets if abs(item["y"] - span["y"]) < 5), None)
         if row is None:
@@ -94,18 +102,23 @@ def extract_page_rows_fitz(doc: fitz.Document, page_number: int) -> tuple[list[d
     raw_rows = []
     for bucket in buckets:
         line_spans = sorted(bucket["spans"], key=lambda x: x["x"])
-        # Відфільтровуємо крапки-лідери
         content_spans = [s for s in line_spans if not is_leader_fragment(s["text"])]
         if not content_spans: continue
             
         full_text = " ".join(s["text"] for s in content_spans)
+        
+        # Рядок вважається жирним, якщо ТЕКСТОВІ спани жирні
+        # (ігноруємо жирність крапок або номерів сторінок в кінці)
+        text_spans = [s for s in content_spans if re.search(r"[А-Яа-яІіЄєЇїҐґA-Za-z]", s["text"])]
+        is_row_bold = any(s["is_bold"] for s in text_spans) if text_spans else any(s["is_bold"] for s in content_spans)
+
         raw_rows.append({
             "text": full_text,
             "clean": normalize_text(full_text),
             "x": min(s["x"] for s in content_spans),
             "y": bucket["y"],
             "font_size": mean(s["font_size"] for s in content_spans),
-            "is_bold": any(s["is_bold"] for s in content_spans)
+            "is_bold": is_row_bold
         })
 
     # Об'єднуємо розірвані рядки змісту (якщо пункт займає 2 рядки)
@@ -238,6 +251,11 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
             for l in b["lines"]:
                 text = "".join(s["text"] for s in l["spans"]).strip()
                 if not text: continue
+
+                # Ігноруємо номери сторінок (тільки цифри у верхній або нижній частині)
+                if text.isdigit() and (l["bbox"][1] < 60 or l["bbox"][3] > height - 60):
+                    continue
+
                 # Ігноруємо Таблиця ..., Рис ...
                 if re.match(r"^(Рис|Табл|Рисунок|Таблиця|Джерело)\.?\s*", text, re.I): continue
                 # Ігноруємо формули (рядки з математичними символами та малою кількістю літер)
