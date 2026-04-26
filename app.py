@@ -458,6 +458,8 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
             appendices_start_page = page_num
             break
 
+    last_page_to_check = (appendices_start_page - 1) if appendices_start_page is not None else len(doc)
+
     def page_starts_with_new_section(page_num: int) -> bool:
         if page_num < 1 or page_num > len(doc):
             return False
@@ -577,7 +579,7 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
         if abs(actual_left - TARGET_LEFT) > 0.5 * CM:
             p_f.append("Ліве поле")
             highlights.append({"page": p_num, "x": 0, "y": 0, "w": actual_left, "h": h})
-        if not has_appendix_heading_at_top and not next_page_starts_new_section and (h - occupied_bottom_y) > 4.5 * CM:
+        if not has_appendix_heading_at_top and not next_page_starts_new_section and p_num != last_page_to_check and (h - occupied_bottom_y) > 4.5 * CM:
             p_f.append("Порожнє місце знизу")
             highlights.append({"page": p_num, "x": 0, "y": occupied_bottom_y, "w": w, "h": h - occupied_bottom_y})
 
