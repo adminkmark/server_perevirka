@@ -655,6 +655,8 @@ def analyze_chapters(doc: fitz.Document) -> dict[str, Any]:
     for p_num in range(3, len(doc) + 1):
         p = doc[p_num-1]
         ls = [l for b in p.get_text("dict")["blocks"] if "lines" in b for l in b["lines"] if "".join(s["text"] for s in l["spans"]).strip() and not ("".join(s["text"] for s in l["spans"]).strip().isdigit() and l["bbox"][1] < 60)]
+        if not ls: continue
+        ls.sort(key=lambda x: x["bbox"][1])
         for idx, line in enumerate(ls):
             txt = "".join(s["text"] for s in line["spans"]).strip()
             if re.match(r"^РОЗДІЛ\s+\d+", txt.upper()):
@@ -678,8 +680,8 @@ def analyze_chapters(doc: fitz.Document) -> dict[str, Any]:
                         t_txt = "".join(s["text"] for s in tl["spans"]).strip()
                         if t_txt != t_txt.upper() or not bool(tl["spans"][0]["flags"] & 16): 
                             p_f.append(f"Назва '{t_txt[:10]}' має бути ВЕЛИКИМИ ЖИРНИМИ"); highlights.append({"page": p_num, "x": tl["bbox"][0], "y": tl["bbox"][1], "w": tl["bbox"][2]-tl["bbox"][0], "h": tl["bbox"][3]-tl["bbox"][1]})
-                    if curr < len(ls) and (ls[curr]["bbox"][1] - title_ls[-1]["bbox"][3]) < 20: 
-                        p_f.append("Відсутній рядок після назви"); highlights.append({"page": p_num, "x": 0, "y": title_ls[-1]["bbox"][3], "w": p.rect.width, "h": 20})
+                    if curr < len(ls) and (ls[curr]["bbox"][1] - title_ls[-1]["bbox"][3]) < 18: 
+                        p_f.append("Відсутній рядок після назви"); highlights.append({"page": p_num, "x": 0, "y": title_ls[-1]["bbox"][3], "w": p.rect.width, "h": 18})
                 
                 if p_f:
                     pages_with_errors.add(p_num)
@@ -691,7 +693,12 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
     for p_num in range(3, len(doc) + 1):
         p = doc[p_num-1]
         ls = [l for b in p.get_text("dict")["blocks"] if "lines" in b for l in b["lines"] if "".join(s["text"] for s in l["spans"]).strip()]
-        l_bound = min([l["bbox"][0] for l in ls if not re.match(r"^[1-3]\.[1-3]", "".join(s["text"] for s in l["spans"]).strip()) and abs((l["bbox"][0]+l["bbox"][2])/2-p.rect.width/2)>50] or [2.5*CM])
+        if not ls: continue
+        ls.sort(key=lambda x: x["bbox"][1])
+        
+        left_candidates = [l["bbox"][0] for l in ls if abs(l["bbox"][0] - 2.5 * CM) <= 0.8 * CM]
+        l_bound = min(left_candidates) if left_candidates else 2.5 * CM
+        
         skip = -1
         for idx, line in enumerate(ls):
             if idx <= skip: continue
@@ -706,20 +713,25 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
                 if abs(current_x - expected_x) > 0.2 * CM:
                     p_f.append(f"Відступ {(current_x - l_bound)/CM:.1f} см замість 1.5"); highlights.append({"page": p_num, "x": l_bound, "y": line["bbox"][1], "w": current_x - l_bound, "h": line["bbox"][3]-line["bbox"][1]})
                 
-                if idx > 0 and (line["bbox"][1] - ls[idx-1]["bbox"][3]) < 20: 
-                    p_f.append("Відсутній рядок зверху"); highlights.append({"page": p_num, "x": 0, "y": line["bbox"][1]-20, "w": p.rect.width, "h": 20})
+                if idx > 0 and (line["bbox"][1] - ls[idx-1]["bbox"][3]) < 18: 
+                    p_f.append("Відсутній рядок зверху"); highlights.append({"page": p_num, "x": 0, "y": line["bbox"][1]-18, "w": p.rect.width, "h": 18})
                 
                 sub_ls, curr = [line], idx + 1
                 while curr < len(ls):
                     l = ls[curr]
                     lt = "".join(s["text"] for s in l["spans"]).strip()
                     if re.match(r"^\d+", lt): break
-                    if bool(l["spans"][0]["flags"] & 16) and (abs(l["bbox"][0]-line["bbox"][0])<10 or abs(l["bbox"][0]-l_bound)<10): sub_ls.append(l); curr += 1
-                    else: break
+                    gap = l["bbox"][1] - sub_ls[-1]["bbox"][3]
+                    is_bold = bool(l["spans"][0]["flags"] & 16)
+                    if is_bold and gap < 18: 
+                        sub_ls.append(l)
+                        curr += 1
+                    else: 
+                        break
                 
                 skip = curr - 1
-                if curr < len(ls) and (ls[curr]["bbox"][1] - sub_ls[-1]["bbox"][3]) < 20: 
-                    p_f.append("Відсутній рядок знизу"); highlights.append({"page": p_num, "x": 0, "y": sub_ls[-1]["bbox"][3], "w": p.rect.width, "h": 20})
+                if curr < len(ls) and (ls[curr]["bbox"][1] - sub_ls[-1]["bbox"][3]) < 18: 
+                    p_f.append("Відсутній рядок знизу"); highlights.append({"page": p_num, "x": 0, "y": sub_ls[-1]["bbox"][3], "w": p.rect.width, "h": 18})
                 
                 if p_f:
                     pages_with_errors.add(p_num)
