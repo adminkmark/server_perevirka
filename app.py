@@ -199,7 +199,7 @@ def is_formula_candidate_text(text: str) -> bool:
             break
     if "=" not in clean:
         return False
-    if re.match(r"^\s*(?:https|http|htpp)\b", clean, flags=re.IGNORECASE):
+    if re.search(r"\b(?:https?|htpp)\b", clean, flags=re.IGNORECASE):
         return False
     if re.match(r"^\s*\d", clean):
         return False
