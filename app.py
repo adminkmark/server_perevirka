@@ -442,7 +442,7 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
     TARGET_LEFT = 2.5 * CM
     TARGET_RIGHT = 1.0 * CM
     INDENT = 1.5 * CM
-    INDENT_TOLERANCE = 0.2 * CM
+    INDENT_TOLERANCE = 0.3 * CM
 
     appendices_start_page = None
     for page_num in range(3, len(doc) + 1):
@@ -705,7 +705,19 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
         for idx, line in enumerate(ls):
             if idx <= skip: continue
             txt = "".join(s["text"] for s in line["spans"]).strip()
-            if re.match(r"^[1-3]\.[1-3]\.?\s+", txt):
+            if re.match(r"^\d+\.\d+\.?\s+", txt):
+                # Перевіряємо, чи це дійсно підрозділ (має бути після крапки або на початку сторінки)
+                is_subchapter = False
+                if idx == 0:
+                    is_subchapter = True
+                else:
+                    prev_txt = "".join(s["text"] for s in ls[idx-1]["spans"]).strip()
+                    if prev_txt.endswith("."):
+                        is_subchapter = True
+                
+                if not is_subchapter:
+                    continue
+
                 p_f = []
                 if not bool(line["spans"][0]["flags"] & 16):
                     p_f.append("Підрозділ не жирний"); highlights.append({"page": p_num, "x": line["bbox"][0], "y": line["bbox"][1], "w": line["bbox"][2]-line["bbox"][0], "h": line["bbox"][3]-line["bbox"][1]})
@@ -863,11 +875,34 @@ def analyze_perelik(doc: fitz.Document) -> dict[str, Any]:
     
     for page_num in range(3, len(doc) + 1):
         page = doc[page_num-1]
-        lines = [l for b in page.get_text("dict")["blocks"] if "lines" in b for l in b["lines"]]
+        blocks = page.get_text("dict")["blocks"]
+        lines = [l for b in blocks if "lines" in b for l in b["lines"]]
+        
+        # Знаходимо межі таблиць та рисунків
+        tables = page.find_tables()
+        table_bboxes = [t.bbox for t in tables.tables]
+        image_bboxes = [b["bbox"] for b in blocks if b.get("type") != 0]
         
         idx = 0
         while idx < len(lines):
             line = lines[idx]
+            l_bbox = line["bbox"]
+            
+            # Пропускаємо, якщо рядок в таблиці або біля зображення
+            in_excluded_zone = False
+            for t_bbox in table_bboxes:
+                if fitz.Rect(l_bbox).intersects(fitz.Rect(t_bbox)):
+                    in_excluded_zone = True
+                    break
+            if not in_excluded_zone:
+                for i_bbox in image_bboxes:
+                    if fitz.Rect(l_bbox).intersects(fitz.Rect(i_bbox)):
+                        in_excluded_zone = True
+                        break
+            
+            if in_excluded_zone:
+                idx += 1; continue
+
             text = "".join(s["text"] for s in line["spans"]).strip()
             if not text:
                 idx += 1; continue
@@ -1222,10 +1257,12 @@ def analyze_table_sources(doc: fitz.Document) -> dict[str, Any]:
                     highlights.append({"page": page_num, "x": source_line["bbox"][0], "y": source_line["bbox"][1], "w": source_line["bbox"][2]-source_line["bbox"][0], "h": source_line["bbox"][3]-source_line["bbox"][1]})
 
             if not ends_with_bracket and not has_source_below:
-                p_f = "Не вказано джерело таблиці (немає '[...]' в кінці назви або 'Джерело' під таблицею)"
-                findings.append(f"Стор. {page_num}: {p_f}")
-                pages_with_errors.add(page_num)
-                highlights.append({"page": page_num, "x": t_bbox[0], "y": t_bbox[1], "w": t_bbox[2]-t_bbox[0], "h": t_bbox[3]-t_bbox[1]})
+                # Перевіряємо, чи таблиця йде до кінця аркуша (допуск 70 пт від низу)
+                if table_bottom < page.rect.height - 70:
+                    p_f = "Не вказано джерело таблиці (немає '[...]' в кінці назви або 'Джерело' під таблицею)"
+                    findings.append(f"Стор. {page_num}: {p_f}")
+                    pages_with_errors.add(page_num)
+                    highlights.append({"page": page_num, "x": t_bbox[0], "y": t_bbox[1], "w": t_bbox[2]-t_bbox[0], "h": t_bbox[3]-t_bbox[1]})
 
     return {"summary": "Джерела таблиць перевірено.", "findings": findings, "is_success": len(findings) == 0, "pages_with_errors": sorted(list(pages_with_errors)), "highlights": highlights}
 
