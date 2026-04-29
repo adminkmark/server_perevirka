@@ -211,7 +211,7 @@ def is_formula_candidate_text(text: str) -> bool:
         return False
     if not re.search(r"[+\-*/^()]", clean):
         return False
-    if re.search(r"[\d%]\s*$", tail_normalized):
+    if re.search(r"(?:%|грн|дол|тис)\.?\s*$", clean, re.IGNORECASE):
         return False
     if len(clean.split()) > 18:
         return False
@@ -287,10 +287,12 @@ def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
 
 def is_valid_citation_content(content: str) -> bool:
-    # Дозволені формати всередині []: [n], [n, c.n], [n; n], [n, c.n; n, c.n]
-    # n - цифри, c. - позначення сторінки (може бути англ 'c' або укр 'с')
+    # Якщо в дужках є текст (літери, крім 'c.' чи 'с.'), ігноруємо перевірку
+    clean_for_check = re.sub(r"[cCсС]\s*\.\s*\d+", "", content)
+    if re.search(r"[a-zа-яіїєґ]", clean_for_check, re.IGNORECASE):
+        return True
+        
     parts = content.split(';')
-    # Регулярний вираз для одного елемента: цифри + опціонально (, c. цифри)
     part_re = re.compile(r"^\s*\d+(\s*,\s*[cCсС]\.\s*\d+)?\s*$")
     for p in parts:
         if not part_re.match(p):
@@ -535,17 +537,39 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
         ]
         first_table_caption_top = min(table_caption_tops) if table_caption_tops else None
 
+        # Знаходимо межі таблиць та рисунків для виключення з перевірки тексту
+        tables = p.find_tables()
+        table_bboxes = [t.bbox for t in tables.tables]
+        image_bboxes = [b["bbox"] for b in page_dict["blocks"] if b.get("type") != 0]
+
         # Основний текст для цієї перевірки беремо лише з основного текстового потоку:
-        # відсікаємо підпис рисунка/таблиці і текст, що належить самим об'єктам нижче.
+        # відсікаємо підписи рисунків/таблиць і текст, що належить самим об'єктам.
         flow_candidates = []
         for item in raw_text_lines:
             text = item["text"]
+            i_bbox = item["line"]["bbox"]
+            
+            # Ігноруємо підписи та джерела
             if re.match(r"^(Таблиця|Рисунок|Джерело)\b", text, re.IGNORECASE):
                 continue
             if first_figure_caption_top is not None and item["y0"] >= first_figure_caption_top - 6:
                 continue
             if first_table_caption_top is not None and item["y0"] >= first_table_caption_top - 6:
                 continue
+            
+            # Ігноруємо текст всередині таблиць або зображень
+            in_excluded = False
+            for t_bbox in table_bboxes:
+                if fitz.Rect(i_bbox).intersects(fitz.Rect(t_bbox)):
+                    in_excluded = True; break
+            if not in_excluded:
+                for img_bbox in image_bboxes:
+                    if fitz.Rect(i_bbox).intersects(fitz.Rect(img_bbox)):
+                        in_excluded = True; break
+            
+            if in_excluded:
+                continue
+                
             flow_candidates.append(item)
 
         if not flow_candidates:
@@ -1015,15 +1039,19 @@ def analyze_tables(doc: fitz.Document) -> dict[str, Any]:
             t_bbox = tab.bbox
             
             # Перевірка: чи не є ця "таблиця" насправді графіком/рисунком?
-            # Часто графіки з сіткою розпізнаються як таблиці.
-            # Якщо під об'єктом є підпис "Рисунок", ми його ігноруємо тут.
+            # Збільшуємо діапазон пошуку підпису "Рисунок" до 120 пт, 
+            # оскільки між рисунком та підписом може бути рядок "Джерело".
             is_figure = False
             for l in all_lines:
-                if l["bbox"][1] > t_bbox[3] and (l["bbox"][1] - t_bbox[3]) < 60:
+                # Шукаємо в межах 120 пт під об'єктом
+                if l["bbox"][1] > t_bbox[3] - 5 and (l["bbox"][1] - t_bbox[3]) < 120:
                     bottom_txt = "".join(s["text"] for s in l["spans"]).strip().lower()
-                    if bottom_txt.startswith("рис.") or bottom_txt.startswith("рисунок"):
-                        is_figure = True
-                        break
+                    if bottom_txt.startswith("рис.") or bottom_txt.startswith("рисунок") or bottom_txt.startswith("джерело"):
+                        # Якщо знайшли "Джерело", продовжуємо шукати "Рисунок" трохи нижче
+                        if bottom_txt.startswith("рис.") or bottom_txt.startswith("рисунок"):
+                            is_figure = True
+                            break
+                        # Якщо це "Джерело", ми просто продовжуємо цикл, щоб знайти "Рисунок" далі
             if is_figure: continue
             
             t_center = (t_bbox[0] + t_bbox[2]) / 2
@@ -1071,7 +1099,7 @@ def analyze_tables(doc: fitz.Document) -> dict[str, Any]:
                 # Ігноруємо перевірку формату, якщо це перенесення таблиці
                 if lower_txt.startswith("продовження") or lower_txt.startswith("кінец"):
                     pass 
-                elif not re.match(r"^Таблиця\s+\d+(\.\d+)*\s*[^\w\s]+\s*.+", txt, re.IGNORECASE): 
+                elif not re.match(r"^Таблиця\s+[А-ЯA-Z]?\s*\d+(\.\d+)*\s*[-–—]\s+.+", txt, re.IGNORECASE): 
                     p_f.append(f"Невірний формат назви: '{txt[:20]}...'")
                     for cl in caption_lines:
                         highlights.append({"page": page_num, "x": cl["bbox"][0], "y": cl["bbox"][1], "w": cl["bbox"][2]-cl["bbox"][0], "h": cl["bbox"][3]-cl["bbox"][1]})
@@ -1112,8 +1140,8 @@ def analyze_figures(doc: fitz.Document) -> dict[str, Any]:
                 caption_lines = [l]
                 next_idx = idx + 1
                 if next_idx < len(all_lines):
-                    next_l = all_lines[next_idx]
-                    if (next_l["bbox"][1] - l["bbox"][3]) < 25:
+                    next_txt = "".join(s["text"] for s in next_l["spans"]).strip()
+                    if (next_l["bbox"][1] - l["bbox"][3]) < 25 and not next_txt.lower().startswith("джерело"):
                         caption_lines.append(next_l)
                         idx += 1
                 
@@ -1125,7 +1153,7 @@ def analyze_figures(doc: fitz.Document) -> dict[str, Any]:
                     p_f.append("Має бути 'Рисунок', а не 'Рис.'")
                     for cl in caption_lines:
                         highlights.append({"page": page_num, "x": cl["bbox"][0], "y": cl["bbox"][1], "w": cl["bbox"][2]-cl["bbox"][0], "h": cl["bbox"][3]-cl["bbox"][1]})
-                elif not re.match(r"^Рисунок\s+\d+(\.\d+)*\s*[^\w\s]+\s*.+", full_txt, re.IGNORECASE):
+                elif not re.match(r"^Рисунок\s+[А-ЯA-Z]?\s*\d+(\.\d+)*\s*[-–—]\s+.+", full_txt, re.IGNORECASE):
                     p_f.append(f"Невірний формат підпису рисунка: '{full_txt[:30]}...'")
                     for cl in caption_lines:
                         highlights.append({"page": page_num, "x": cl["bbox"][0], "y": cl["bbox"][1], "w": cl["bbox"][2]-cl["bbox"][0], "h": cl["bbox"][3]-cl["bbox"][1]})
@@ -1336,7 +1364,7 @@ def analyze_figure_sources(doc: fitz.Document) -> dict[str, Any]:
                 if next_idx < len(all_lines):
                     next_l = all_lines[next_idx]
                     next_txt = "".join(s["text"] for s in next_l["spans"]).strip()
-                    if next_txt and (next_l["bbox"][1] - l["bbox"][3]) < 25:
+                    if next_txt and (next_l["bbox"][1] - l["bbox"][3]) < 25 and not next_txt.lower().startswith("джерело"):
                         caption_lines.append(next_l)
                         next_idx += 1
                         
