@@ -286,6 +286,17 @@ CM = 28.346 # 1 см в пунктах
 def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
 
+def is_valid_citation_content(content: str) -> bool:
+    # Дозволені формати всередині []: [n], [n, c.n], [n; n], [n, c.n; n, c.n]
+    # n - цифри, c. - позначення сторінки (може бути англ 'c' або укр 'с')
+    parts = content.split(';')
+    # Регулярний вираз для одного елемента: цифри + опціонально (, c. цифри)
+    part_re = re.compile(r"^\s*\d+(\s*,\s*[cCсС]\.\s*\d+)?\s*$")
+    for p in parts:
+        if not part_re.match(p):
+            return False
+    return True
+
 def is_leader_fragment(text: str) -> bool:
     clean = normalize_text(text)
     return not clean or re.fullmatch(r"[.\d\s\u2026_]+", clean) is not None
@@ -593,6 +604,16 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
         if not has_appendix_heading_at_top and not next_page_starts_new_section and p_num != last_page_to_check and (h - occupied_bottom_y) > 4.5 * CM:
             p_f.append("Порожнє місце знизу")
             highlights.append({"page": p_num, "x": 0, "y": occupied_bottom_y, "w": w, "h": h - occupied_bottom_y})
+
+        # Перевірка формату цитат [n] або [n, c.n]
+        for item in flow_candidates:
+            text = item["text"]
+            # Шукаємо все в квадратних дужках
+            brackets = re.findall(r"\[([^\]]+)\]", text)
+            for content in brackets:
+                if not is_valid_citation_content(content):
+                    p_f.append(f"Невірний формат посилання: '[{content}]'. Має бути [n] або [n, c.n] (можна декілька через ';')")
+                    highlights.append({"page": p_num, "x": item["x0"], "y": item["y0"], "w": item["width"], "h": item["y1"] - item["y0"]})
 
         def is_regular_text_line(line: dict[str, Any]) -> bool:
             text = "".join(s["text"] for s in line["spans"]).strip()
