@@ -541,6 +541,8 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
         tables = p.find_tables()
         table_bboxes = [t.bbox for t in tables.tables]
         image_bboxes = [b["bbox"] for b in page_dict["blocks"] if b.get("type") != 0]
+        drawings = p.get_drawings()
+        drawing_bboxes = [d["rect"] for d in drawings if d["rect"].width > 20 or d["rect"].height > 20]
 
         # Основний текст для цієї перевірки беремо лише з основного текстового потоку:
         # відсікаємо підписи рисунків/таблиць і текст, що належить самим об'єктам.
@@ -565,6 +567,10 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
             if not in_excluded:
                 for img_bbox in image_bboxes:
                     if fitz.Rect(i_bbox).intersects(fitz.Rect(img_bbox)):
+                        in_excluded = True; break
+            if not in_excluded:
+                for d_bbox in drawing_bboxes:
+                    if fitz.Rect(i_bbox).intersects(fitz.Rect(d_bbox)):
                         in_excluded = True; break
             
             if in_excluded:
@@ -1037,22 +1043,55 @@ def analyze_tables(doc: fitz.Document) -> dict[str, Any]:
         for tab in tabs:
             p_f = []
             t_bbox = tab.bbox
+            # Визначаємо, чи є цей об'єкт таблицею чи рисунком.
+            # Якщо є чітка сітка (find_tables знайшов об'єкт), ми вважаємо це таблицею,
+            # ЯКЩО тільки під нею не знайдено підпис "Рисунок".
             
-            # Перевірка: чи не є ця "таблиця" насправді графіком/рисунком?
-            # Збільшуємо діапазон пошуку підпису "Рисунок" до 120 пт, 
-            # оскільки між рисунком та підписом може бути рядок "Джерело".
+            # 1. Перевіряємо наявність підпису "Рисунок" знизу (тоді це рисунок, ігноруємо)
             is_figure = False
-            for l in all_lines:
-                # Шукаємо в межах 120 пт під об'єктом
-                if l["bbox"][1] > t_bbox[3] - 5 and (l["bbox"][1] - t_bbox[3]) < 120:
-                    bottom_txt = "".join(s["text"] for s in l["spans"]).strip().lower()
-                    if bottom_txt.startswith("рис.") or bottom_txt.startswith("рисунок") or bottom_txt.startswith("джерело"):
-                        # Якщо знайшли "Джерело", продовжуємо шукати "Рисунок" трохи нижче
-                        if bottom_txt.startswith("рис.") or bottom_txt.startswith("рисунок"):
-                            is_figure = True
-                            break
-                        # Якщо це "Джерело", ми просто продовжуємо цикл, щоб знайти "Рисунок" далі
-            if is_figure: continue
+            lines_below = [l for l in all_lines if l["bbox"][1] > t_bbox[3] - 10]
+            lines_below.sort(key=lambda x: x["bbox"][1])
+            for l in lines_below:
+                # Шукаємо підпис у межах 150 пт (~5 см)
+                if (l["bbox"][1] - t_bbox[3]) > 150: break 
+                txt_below = "".join(s["text"] for s in l["spans"]).strip().lower()
+                if txt_below.startswith("рис.") or txt_below.startswith("рисунок"):
+                    is_figure = True; break
+                # Якщо між об'єктом і підписом є сторонній текст (не джерело), це не наш підпис
+                if txt_below and not txt_below.startswith("джерело") and (l["bbox"][1] - t_bbox[3]) > 60:
+                    break
+            
+            if is_figure:
+                continue
+
+            # 2. Фільтруємо занадто прості об'єкти (наприклад, одиночні рамки)
+            if len(tab.cells) < 2 or (t_bbox[2] - t_bbox[0]) < 50:
+                continue
+
+            # 3. Шукаємо назву таблиці над нею ("Таблиця n")
+            lines_above = [l for l in all_lines if l["bbox"][3] < t_bbox[1] + 5]
+            lines_above.sort(key=lambda x: x["bbox"][1], reverse=True)
+            
+            caption_lines = []
+            found_table_keyword = False
+            for l in lines_above:
+                # Назва має бути не далі ніж 100 пт над таблицею
+                if (t_bbox[1] - l["bbox"][3]) > 100: break
+                txt_above = "".join(s["text"] for s in l["spans"]).strip().lower()
+                
+                if not caption_lines:
+                    if (t_bbox[1] - l["bbox"][3]) < 45: 
+                        caption_lines.append(l)
+                        if txt_above.startswith("таблиця") or txt_above.startswith("продовження") or txt_above.startswith("кінец"):
+                            found_table_keyword = True; break
+                else:
+                    if (caption_lines[-1]["bbox"][1] - l["bbox"][3]) < 30:
+                        caption_lines.append(l)
+                        if txt_above.startswith("таблиця") or txt_above.startswith("продовження") or txt_above.startswith("кінец"):
+                            found_table_keyword = True; break
+                    else: break
+            
+            caption_lines.reverse()
             
             t_center = (t_bbox[0] + t_bbox[2]) / 2
             # Центр розраховується з урахуванням полів (ліве 2.5 см, праве 1 см)
