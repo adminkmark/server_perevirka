@@ -278,35 +278,65 @@ def analyze_formulas(doc: fitz.Document) -> dict[str, Any]:
             if "lines" in b
             for l in b["lines"]
         ]
-        lines.sort(key=lambda x: x["bbox"][1])
-        valid_lines = [
+        
+        # 1. Попередня фільтрація та сортування за Y
+        valid_raw_lines = [
             l for l in lines
             if "".join(s["text"] for s in l["spans"]).strip()
             and not is_page_number_line(l, page.rect.height)
         ]
+        valid_raw_lines.sort(key=lambda x: x["bbox"][1])
 
-        for idx, line in enumerate(valid_lines):
-            text = "".join(s["text"] for s in line["spans"]).strip()
-            if not is_formula_candidate_text(text):
+        # 2. Групування сегментів, що знаходяться на одній горизонталі
+        horizontal_groups = []
+        for l in valid_raw_lines:
+            if not horizontal_groups:
+                horizontal_groups.append([l])
+            else:
+                last_group = horizontal_groups[-1]
+                # Допуск 5 пунктів для вертикального вирівнювання
+                if abs(l["bbox"][1] - last_group[0]["bbox"][1]) < 5:
+                    last_group.append(l)
+                else:
+                    horizontal_groups.append([l])
+
+        # 3. Аналіз об'єднаних рядків
+        for idx, group in enumerate(horizontal_groups):
+            group.sort(key=lambda x: x["bbox"][0]) # Зліва направо
+            merged_text = " ".join("".join(s["text"] for s in l["spans"]).strip() for l in group)
+            
+            # Використовуємо об'єднаний текст для визначення, чи це формула
+            if not is_formula_candidate_text(merged_text):
                 continue
 
             p_f = []
-            line_center = (line["bbox"][0] + line["bbox"][2]) / 2
+            # Координати всього об'єднаного рядка
+            group_x0 = min(l["bbox"][0] for l in group)
+            group_x1 = max(l["bbox"][2] for l in group)
+            group_y0 = min(l["bbox"][1] for l in group)
+            group_y1 = max(l["bbox"][3] for l in group)
+            
+            line_center = (group_x0 + group_x1) / 2
             if abs(line_center - page_width / 2) > 70:
                 p_f.append("Формула або рівняння має бути розміщене по центру сторінки")
 
-            if not formula_number_pattern.search(text):
+            if not formula_number_pattern.search(merged_text):
                 p_f.append("Праворуч від формули має бути номер у дужках у форматі (розділ.порядковий_номер)")
             else:
-                if (page_width - line["bbox"][2]) > 120:
+                if (page_width - group_x1) > 120:
                     p_f.append("Номер формули має бути у крайньому правому положенні на рядку")
 
+            # Перевірка вільних рядків зверху/знизу
             if idx > 0:
-                gap_above = line["bbox"][1] - valid_lines[idx - 1]["bbox"][3]
+                prev_group = horizontal_groups[idx - 1]
+                prev_y1 = max(l["bbox"][3] for l in prev_group)
+                gap_above = group_y0 - prev_y1
                 if gap_above < 18:
                     p_f.append("Вище формули має бути залишено щонайменше один вільний рядок")
-            if idx < len(valid_lines) - 1:
-                gap_below = valid_lines[idx + 1]["bbox"][1] - line["bbox"][3]
+            if idx < len(horizontal_groups) - 1:
+                next_group = horizontal_groups[idx + 1]
+                next_y0 = min(l["bbox"][1] for l in next_group)
+                gap_below = next_y0 - group_y1
                 if gap_below < 18:
                     p_f.append("Нижче формули має бути залишено щонайменше один вільний рядок")
 
@@ -315,10 +345,10 @@ def analyze_formulas(doc: fitz.Document) -> dict[str, Any]:
                 findings.extend(f"Стор. {page_num}: {msg}" for msg in p_f)
                 highlights.append({
                     "page": page_num,
-                    "x": line["bbox"][0],
-                    "y": line["bbox"][1],
-                    "w": line["bbox"][2] - line["bbox"][0],
-                    "h": line["bbox"][3] - line["bbox"][1]
+                    "x": group_x0,
+                    "y": group_y0,
+                    "w": group_x1 - group_x0,
+                    "h": group_y1 - group_y0
                 })
 
     return {
@@ -1281,41 +1311,55 @@ def analyze_table_breaks(doc: fitz.Document) -> dict[str, Any]:
         valid_lines = [l for l in all_lines if not ("".join(s["text"] for s in l["spans"]).strip().isdigit() and l["bbox"][1] < 60)]
         if not valid_lines: continue
         
-        first_tab = tabs[0]
-        t_bbox = first_tab.bbox
-        
-        # Перевіряємо, чи таблиця знаходиться на початку аркуша (верхня межа < 150 pt, тобто ~5.3 см)
-        if t_bbox[1] < 150:
-            lines_above = [l for l in valid_lines if l["bbox"][3] < t_bbox[1]]
+        for first_tab in tabs:
+            t_bbox = first_tab.bbox
             
-            caption_l = None
-            for l in lines_above:
-                txt = "".join(s["text"] for s in l["spans"]).strip().lower()
-                if txt.startswith("таблиця") or txt.startswith("продовження") or txt.startswith("кінец"):
-                    caption_l = l
-                    break
-                    
-            if caption_l:
-                txt = "".join(s["text"] for s in caption_l["spans"]).strip()
-                lower_txt = txt.lower()
-                if lower_txt.startswith("продовження") or lower_txt.startswith("кінец"):
-                    # Перевіряємо вирівнювання по правому краю
-                    expected_right = page.rect.width - 1.0 * CM
-                    actual_right = caption_l["bbox"][2]
-                    # Допуск близько 1 см (30 pt)
-                    if abs(expected_right - actual_right) > 30:
-                        p_f = f"Текст '{txt[:20]}...' не вирівняний по правому краю"
+            # Перевірка: чи не є ця "таблиця" насправді рисунком?
+            is_real_table = is_likely_table(page, first_tab)
+            has_figure_caption_below = False
+            lines_below = [l for l in all_lines if l["bbox"][1] > t_bbox[3] - 10]
+            lines_below.sort(key=lambda x: x["bbox"][1])
+            for l in lines_below:
+                if (l["bbox"][1] - t_bbox[3]) > 120: break
+                txt_below = "".join(s["text"] for s in l["spans"]).strip().lower()
+                if txt_below.startswith("рис.") or txt_below.startswith("рисунок"):
+                    has_figure_caption_below = True; break
+            
+            if not is_real_table or has_figure_caption_below:
+                continue
+                
+            # Перевіряємо, чи таблиця знаходиться на початку аркуша (верхня межа < 150 pt, тобто ~5.3 см)
+            if t_bbox[1] < 150:
+                lines_above = [l for l in valid_lines if l["bbox"][3] < t_bbox[1]]
+                
+                caption_l = None
+                for l in lines_above:
+                    txt = "".join(s["text"] for s in l["spans"]).strip().lower()
+                    if txt.startswith("таблиця") or txt.startswith("продовження") or txt.startswith("кінец"):
+                        caption_l = l
+                        break
+                        
+                if caption_l:
+                    txt = "".join(s["text"] for s in caption_l["spans"]).strip()
+                    lower_txt = txt.lower()
+                    if lower_txt.startswith("продовження") or lower_txt.startswith("кінец"):
+                        # Перевіряємо вирівнювання по правому краю
+                        expected_right = page.rect.width - 1.0 * CM
+                        actual_right = caption_l["bbox"][2]
+                        # Допуск близько 1 см (30 pt)
+                        if abs(expected_right - actual_right) > 30:
+                            p_f = f"Текст '{txt[:20]}...' не вирівняний по правому краю"
+                            findings.append(f"Стор. {page_num}: {p_f}")
+                            pages_with_errors.add(page_num)
+                            highlights.append({"page": page_num, "x": caption_l["bbox"][0], "y": caption_l["bbox"][1], "w": caption_l["bbox"][2]-caption_l["bbox"][0], "h": caption_l["bbox"][3]-caption_l["bbox"][1]})
+                else:
+                    # Назви немає. Перевіряємо, чи це дійсно початок аркуша, а не просто абзац тексту перед таблицею
+                    # Якщо рядків над таблицею мало (< 3), вважаємо, що таблиця починає сторінку
+                    if len(lines_above) < 3:
+                        p_f = "Сторінка починається з таблиці без вказівки 'Продовження/Кінець таблиці' (або 'Таблиця')"
                         findings.append(f"Стор. {page_num}: {p_f}")
                         pages_with_errors.add(page_num)
-                        highlights.append({"page": page_num, "x": caption_l["bbox"][0], "y": caption_l["bbox"][1], "w": caption_l["bbox"][2]-caption_l["bbox"][0], "h": caption_l["bbox"][3]-caption_l["bbox"][1]})
-            else:
-                # Назви немає. Перевіряємо, чи це дійсно початок аркуша, а не просто абзац тексту перед таблицею
-                # Якщо рядків над таблицею мало (< 3), вважаємо, що таблиця починає сторінку
-                if len(lines_above) < 3:
-                    p_f = "Сторінка починається з таблиці без вказівки 'Продовження/Кінець таблиці' (або 'Таблиця')"
-                    findings.append(f"Стор. {page_num}: {p_f}")
-                    pages_with_errors.add(page_num)
-                    highlights.append({"page": page_num, "x": t_bbox[0], "y": t_bbox[1], "w": t_bbox[2]-t_bbox[0], "h": 20})
+                        highlights.append({"page": page_num, "x": t_bbox[0], "y": t_bbox[1], "w": t_bbox[2]-t_bbox[0], "h": 20})
 
     return {"summary": "Розриви таблиць перевірено.", "findings": findings, "is_success": len(findings) == 0, "pages_with_errors": sorted(list(pages_with_errors)), "highlights": highlights}
 
@@ -1336,16 +1380,22 @@ def analyze_table_sources(doc: fitz.Document) -> dict[str, Any]:
         
         for tab in tabs:
             t_bbox = tab.bbox
-            table_bottom = estimate_table_bottom_from_horizontal_rule(page, t_bbox)
             
-            is_figure = False
-            for l in all_lines:
-                if l["bbox"][1] > table_bottom and (l["bbox"][1] - table_bottom) < 60:
-                    bottom_txt = "".join(s["text"] for s in l["spans"]).strip().lower()
-                    if bottom_txt.startswith("рис.") or bottom_txt.startswith("рисунок"):
-                        is_figure = True
-                        break
-            if is_figure: continue
+            # ВИРІШАЛЬНИЙ ТЕСТ: Таблиця чи Рисунок?
+            is_real_table = is_likely_table(page, tab)
+            has_figure_caption_below = False
+            lines_below_obj = [l for l in all_lines if l["bbox"][1] > t_bbox[3] - 10]
+            lines_below_obj.sort(key=lambda x: x["bbox"][1])
+            for l in lines_below_obj:
+                if (l["bbox"][1] - t_bbox[3]) > 120: break
+                txt_below = "".join(s["text"] for s in l["spans"]).strip().lower()
+                if txt_below.startswith("рис.") or txt_below.startswith("рисунок"):
+                    has_figure_caption_below = True; break
+            
+            if not is_real_table or has_figure_caption_below:
+                continue
+                
+            table_bottom = estimate_table_bottom_from_horizontal_rule(page, t_bbox)
             
             lines_above = [l for l in all_lines if l["bbox"][3] < t_bbox[1]]
             lines_above.reverse()
