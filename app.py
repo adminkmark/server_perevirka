@@ -371,15 +371,16 @@ def analyze_zmist(rows: list[dict[str, Any]], page_width: float, page_num: int, 
         actual_bottom = max(row["bbox"][3] for row in content_rows)
 
         if abs(actual_left - target_left) > margin_tolerance:
-            findings.append(f"Стор. {page_num}: Ліве поле змісту має бути 2,5 см.")
+            findings.append(f"Стор. {page_num}: Ліве поле змісту має бути {target_left/CM:.1f} см. Фактично: {actual_left/CM:.1f} см")
             pages_with_errors.add(page_num)
             highlights.append({"page": page_num, "x": 0, "y": 0, "w": actual_left, "h": page_height})
         if abs(actual_top - target_top) > margin_tolerance:
-            findings.append(f"Стор. {page_num}: Верхнє поле змісту має бути 2 см.")
+            findings.append(f"Стор. {page_num}: Верхнє поле змісту має бути {target_top/CM:.1f} см. Фактично: {actual_top/CM:.1f} см")
             pages_with_errors.add(page_num)
             highlights.append({"page": page_num, "x": 0, "y": 0, "w": page_width, "h": actual_top})
-        if abs((page_width - actual_right) - target_right) > margin_tolerance:
-            findings.append(f"Стор. {page_num}: Праве поле змісту має бути 1 см.")
+        actual_right_margin = page_width - actual_right
+        if abs(actual_right_margin - target_right) > margin_tolerance:
+            findings.append(f"Стор. {page_num}: Праве поле змісту має бути {target_right/CM:.1f} см. Фактично: {actual_right_margin/CM:.1f} см")
             pages_with_errors.add(page_num)
             highlights.append({"page": page_num, "x": actual_right, "y": 0, "w": max(1, page_width - actual_right), "h": page_height})
         if (page_height - actual_bottom) < (target_bottom - margin_tolerance):
@@ -577,8 +578,18 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
         next_page_starts_new_section = page_starts_with_new_section(p_num + 1)
         p_f = []
         if abs(actual_left - TARGET_LEFT) > 0.5 * CM:
-            p_f.append("Ліве поле")
+            p_f.append(f"Ліве поле має бути {TARGET_LEFT/CM:.1f} см. Фактично: {actual_left/CM:.1f} см")
             highlights.append({"page": p_num, "x": 0, "y": 0, "w": actual_left, "h": h})
+        
+        # Перевірка правого поля (для довгих рядків)
+        long_lines = [item for item in flow_candidates if item["width"] > (w * 0.6)]
+        if long_lines:
+            actual_right = max(item["x1"] for item in long_lines)
+            actual_right_margin = w - actual_right
+            if abs(actual_right_margin - TARGET_RIGHT) > 0.5 * CM:
+                p_f.append(f"Праве поле має бути {TARGET_RIGHT/CM:.1f} см. Фактично: {actual_right_margin/CM:.1f} см")
+                highlights.append({"page": p_num, "x": actual_right, "y": 0, "w": max(1, w - actual_right), "h": h})
+
         if not has_appendix_heading_at_top and not next_page_starts_new_section and p_num != last_page_to_check and (h - occupied_bottom_y) > 4.5 * CM:
             p_f.append("Порожнє місце знизу")
             highlights.append({"page": p_num, "x": 0, "y": occupied_bottom_y, "w": w, "h": h - occupied_bottom_y})
@@ -724,7 +735,7 @@ def analyze_subchapters(doc: fitz.Document) -> dict[str, Any]:
                 
                 current_x = line["bbox"][0]
                 expected_x = l_bound + 1.5 * CM
-                if abs(current_x - expected_x) > 0.2 * CM:
+                if abs(current_x - expected_x) > 0.3 * CM:
                     p_f.append(f"Відступ {(current_x - l_bound)/CM:.1f} см замість 1.5"); highlights.append({"page": p_num, "x": l_bound, "y": line["bbox"][1], "w": current_x - l_bound, "h": line["bbox"][3]-line["bbox"][1]})
                 
                 if idx > 0 and (line["bbox"][1] - ls[idx-1]["bbox"][3]) < 18: 
@@ -882,13 +893,16 @@ def analyze_perelik(doc: fitz.Document) -> dict[str, Any]:
         tables = page.find_tables()
         table_bboxes = [t.bbox for t in tables.tables]
         image_bboxes = [b["bbox"] for b in blocks if b.get("type") != 0]
+        drawings = page.get_drawings()
+        drawing_bboxes = [d["rect"] for d in drawings if d["rect"].width > 20 or d["rect"].height > 20]
         
         idx = 0
         while idx < len(lines):
             line = lines[idx]
             l_bbox = line["bbox"]
+            text = "".join(s["text"] for s in line["spans"]).strip()
             
-            # Пропускаємо, якщо рядок в таблиці або біля зображення
+            # Пропускаємо, якщо рядок в таблиці, біля зображення або графіки
             in_excluded_zone = False
             for t_bbox in table_bboxes:
                 if fitz.Rect(l_bbox).intersects(fitz.Rect(t_bbox)):
@@ -899,6 +913,20 @@ def analyze_perelik(doc: fitz.Document) -> dict[str, Any]:
                     if fitz.Rect(l_bbox).intersects(fitz.Rect(i_bbox)):
                         in_excluded_zone = True
                         break
+            if not in_excluded_zone:
+                # Якщо рядок перетинається з великою кількістю ліній/прямокутників
+                intersect_count = 0
+                for d_rect in drawing_bboxes:
+                    if fitz.Rect(l_bbox).intersects(d_rect):
+                        intersect_count += 1
+                if intersect_count > 0:
+                    in_excluded_zone = True
+
+            # Також ігноруємо дуже короткі рядки, що містять лише маркер (типово для осередків таблиць)
+            if not in_excluded_zone and len(text) <= 2:
+                # Якщо це просто одинокий символ в "підозрілому" місці
+                if l_bbox[2] - l_bbox[0] < 60:
+                    in_excluded_zone = True
             
             if in_excluded_zone:
                 idx += 1; continue
