@@ -179,6 +179,51 @@ def is_first_text_line_below_visual_anchor(
     return True
 
 
+def is_complex_diagram(page: fitz.Page, bbox: Any) -> bool:
+    # Перевіряємо, чи є в зоні об'єкта елементи, нетипові для таблиць (стрілки, криві тощо)
+    try:
+        drawings = page.get_drawings()
+    except:
+        return False
+        
+    rect = fitz.Rect(bbox)
+    for d in drawings:
+        if not rect.intersects(d["rect"]):
+            continue
+        # Якщо є криві (с) або похилі лінії, які не є межами комірок
+        for item in d.get("items", []):
+            if item[0] in ("c", "q"): # Криві Безьє
+                return True
+            if item[0] == "l":
+                p1, p2 = item[1], item[2]
+                # Якщо лінія не горизонтальна і не вертикальна
+                if abs(p1[0] - p2[0]) > 2 and abs(p1[1] - p2[1]) > 2:
+                    return True
+    return False
+
+def is_likely_table(page: fitz.Page, tab: Any) -> bool:
+    # Аналіз структури: чи схожий знайдений об'єкт на академічну таблицю
+    bbox = tab.bbox
+    cells = tab.cells
+    if not cells or len(cells) < 4:
+        return False
+        
+    # Перевіряємо регулярність: чи утворюють комірки щільну сітку
+    # В академічній таблиці комірки зазвичай прилягають одна до одної
+    # У діаграмах між блоками часто великі порожні простори
+    total_cell_area = sum((c[2]-c[0])*(c[3]-c[1]) for c in cells if c)
+    bbox_area = (bbox[2]-bbox[0])*(bbox[3]-bbox[1])
+    
+    # Якщо комірки займають менше 60% площі рамки - це швидше схема/діаграма
+    if bbox_area > 0 and (total_cell_area / bbox_area) < 0.6:
+        return False
+        
+    # Якщо в зоні є стрілки або криві - це рисунок
+    if is_complex_diagram(page, bbox):
+        return False
+        
+    return True
+
 def is_formula_candidate_text(text: str) -> bool:
     clean = normalize_text(text)
     tail_normalized = clean
@@ -211,8 +256,11 @@ def is_formula_candidate_text(text: str) -> bool:
         return False
     if not re.search(r"[+\-*/^()]", clean):
         return False
-    if re.search(r"(?:%|грн|дол|тис)\.?\s*$", clean, re.IGNORECASE):
+    # Якщо в кінці є знак відсотка або одиниці виміру - це розрахунок, а не формула
+    clean_end = clean.rstrip(" .")
+    if clean_end.endswith("%") or any(clean_end.lower().endswith(s) for s in ["грн", "дол", "тис", "млн", "млрд"]):
         return False
+    
     if len(clean.split()) > 18:
         return False
     return True
@@ -571,7 +619,14 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
             if not in_excluded:
                 for d_bbox in drawing_bboxes:
                     if fitz.Rect(i_bbox).intersects(fitz.Rect(d_bbox)):
-                        in_excluded = True; break
+                        # Додаткова перевірка: чи не є цей малюнок частиною тексту (наприклад, підкреслення)?
+                        # Якщо малюнок великий - це діаграма
+                        if d_bbox.width > 30 or d_bbox.height > 30:
+                            in_excluded = True; break
+            
+            # Додатковий структурний аналіз зони навколо рядка
+            if not in_excluded and is_complex_diagram(p, i_bbox):
+                in_excluded = True
             
             if in_excluded:
                 continue
@@ -1043,32 +1098,25 @@ def analyze_tables(doc: fitz.Document) -> dict[str, Any]:
         for tab in tabs:
             p_f = []
             t_bbox = tab.bbox
-            # Визначаємо, чи є цей об'єкт таблицею чи рисунком.
-            # Якщо є чітка сітка (find_tables знайшов об'єкт), ми вважаємо це таблицею,
-            # ЯКЩО тільки під нею не знайдено підпис "Рисунок".
             
-            # 1. Перевіряємо наявність підпису "Рисунок" знизу (тоді це рисунок, ігноруємо)
-            is_figure = False
+            # ВИРІШАЛЬНИЙ ТЕСТ: Таблиця чи Рисунок?
+            # Використовуємо структурний аналіз замість пошуку слів
+            is_real_table = is_likely_table(page, tab)
+            
+            # Також перевіряємо наявність підпису "Рисунок" знизу як додатковий сигнал
+            has_figure_caption_below = False
             lines_below = [l for l in all_lines if l["bbox"][1] > t_bbox[3] - 10]
             lines_below.sort(key=lambda x: x["bbox"][1])
             for l in lines_below:
-                # Шукаємо підпис у межах 150 пт (~5 см)
-                if (l["bbox"][1] - t_bbox[3]) > 150: break 
+                if (l["bbox"][1] - t_bbox[3]) > 120: break
                 txt_below = "".join(s["text"] for s in l["spans"]).strip().lower()
                 if txt_below.startswith("рис.") or txt_below.startswith("рисунок"):
-                    is_figure = True; break
-                # Якщо між об'єктом і підписом є сторонній текст (не джерело), це не наш підпис
-                if txt_below and not txt_below.startswith("джерело") and (l["bbox"][1] - t_bbox[3]) > 60:
-                    break
+                    has_figure_caption_below = True; break
             
-            if is_figure:
+            if not is_real_table or has_figure_caption_below:
                 continue
 
-            # 2. Фільтруємо занадто прості об'єкти (наприклад, одиночні рамки)
-            if len(tab.cells) < 2 or (t_bbox[2] - t_bbox[0]) < 50:
-                continue
-
-            # 3. Шукаємо назву таблиці над нею ("Таблиця n")
+            # Якщо це таблиця, вона ОБОВ'ЯЗКОВО повинна мати назву зверху
             lines_above = [l for l in all_lines if l["bbox"][3] < t_bbox[1] + 5]
             lines_above.sort(key=lambda x: x["bbox"][1], reverse=True)
             
