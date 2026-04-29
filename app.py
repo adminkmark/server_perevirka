@@ -1257,6 +1257,7 @@ def analyze_figures(doc: fitz.Document) -> dict[str, Any]:
                 caption_lines = [l]
                 next_idx = idx + 1
                 if next_idx < len(all_lines):
+                    next_l = all_lines[next_idx]
                     next_txt = "".join(s["text"] for s in next_l["spans"]).strip()
                     if (next_l["bbox"][1] - l["bbox"][3]) < 25 and not next_txt.lower().startswith("джерело"):
                         caption_lines.append(next_l)
