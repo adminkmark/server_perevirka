@@ -616,8 +616,11 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
         first_table_caption_top = min(table_caption_tops) if table_caption_tops else None
 
         # Знаходимо межі таблиць та рисунків для виключення з перевірки тексту
-        tables = p.find_tables()
-        table_bboxes = [t.bbox for t in tables.tables]
+        try:
+            tables = p.find_tables()
+            table_bboxes = [t.bbox for t in tables.tables] if tables and tables.tables else []
+        except Exception:
+            table_bboxes = []
         image_bboxes = [b["bbox"] for b in page_dict["blocks"] if b.get("type") != 0]
         drawings = p.get_drawings()
         drawing_bboxes = [d["rect"] for d in drawings if d["rect"].width > 20 or d["rect"].height > 20]
@@ -1026,8 +1029,11 @@ def analyze_perelik(doc: fitz.Document) -> dict[str, Any]:
         lines = [l for b in blocks if "lines" in b for l in b["lines"]]
         
         # Знаходимо межі таблиць та рисунків
-        tables = page.find_tables()
-        table_bboxes = [t.bbox for t in tables.tables]
+        try:
+            tables = page.find_tables()
+            table_bboxes = [t.bbox for t in tables.tables] if tables and tables.tables else []
+        except Exception:
+            table_bboxes = []
         image_bboxes = [b["bbox"] for b in blocks if b.get("type") != 0]
         drawings = page.get_drawings()
         drawing_bboxes = [d["rect"] for d in drawings if d["rect"].width > 20 or d["rect"].height > 20]
@@ -1474,7 +1480,7 @@ def analyze_table_sources(doc: fitz.Document) -> dict[str, Any]:
             if not ends_with_bracket and not has_source_below:
                 # Перевіряємо, чи таблиця йде до кінця аркуша (допуск 70 пт від низу)
                 if table_bottom < page.rect.height - 70:
-                    p_f = "Не вказано джерело таблиці (немає '[...]' в кінці назви або 'Джерело' під таблицею)"
+                    p_f = "Не вказано джерело таблиці (немає '[...]' в кінці назви або 'Джерело' під таблицею. Можливо таблиця переходить на іншу сторінку, тоді на цьому листі не повинно бути зайвого місця під нею)"
                     findings.append(f"Стор. {page_num}: {p_f}")
                     pages_with_errors.add(page_num)
                     highlights.append({"page": page_num, "x": t_bbox[0], "y": t_bbox[1], "w": t_bbox[2]-t_bbox[0], "h": t_bbox[3]-t_bbox[1]})
