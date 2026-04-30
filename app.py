@@ -633,7 +633,7 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
             i_bbox = item["line"]["bbox"]
             
             # Ігноруємо підписи та джерела
-            if re.match(r"^(Таблиця|Рисунок|Джерело)\b", text, re.IGNORECASE):
+            if re.match(r"^(Таблиця|Рисунок|Джерело|(Продовження|Кінець|Кінец)\s+табл)\b", text, re.IGNORECASE):
                 continue
             if first_figure_caption_top is not None and item["y0"] >= first_figure_caption_top - 6:
                 continue
@@ -747,7 +747,7 @@ def analyze_general_text(doc: fitz.Document) -> dict[str, Any]:
                 return False
             if re.match(r"^\d+(\.\d+)*\.?\s+", text):
                 return False
-            if re.match(r"^(Таблиця|Рисунок|Джерело|Формула|Рівняння)\b", text, re.IGNORECASE):
+            if re.match(r"^(Таблиця|Рисунок|Джерело|Формула|Рівняння|(Продовження|Кінець|Кінец)\s+табл)\b", text, re.IGNORECASE):
                 return False
             if "=" in text:
                 return False
