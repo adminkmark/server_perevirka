@@ -1222,7 +1222,7 @@ def analyze_tables(doc: fitz.Document) -> dict[str, Any]:
                 # Ігноруємо перевірку формату, якщо це перенесення таблиці
                 if lower_txt.startswith("продовження") or lower_txt.startswith("кінец"):
                     pass 
-                elif not re.match(r"^Таблиця\s+[А-ЯA-Z]?\s*\d+(\.\d+)*\s*[-–—]\s+.+", txt, re.IGNORECASE): 
+                elif not re.match(r"^Таблиця\s+[А-ЯA-Z]?\.?\s*\d+(\.\d+)*\s*[-–—]\s+.+", txt, re.IGNORECASE): 
                     p_f.append(f"Невірний формат назви: '{txt[:20]}...'")
                     for cl in caption_lines:
                         highlights.append({"page": page_num, "x": cl["bbox"][0], "y": cl["bbox"][1], "w": cl["bbox"][2]-cl["bbox"][0], "h": cl["bbox"][3]-cl["bbox"][1]})
